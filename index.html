@@ -130,6 +130,11 @@ tr.log-row td{background:var(--surface-2);white-space:normal;}
 .log-entry .date{font-family:var(--font-mono);color:var(--ink-muted);white-space:nowrap;}
 .log-form{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:8px;}
 .log-form textarea{width:220px;height:32px;resize:vertical;}
+.ledger-summary{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--ink-2);background:var(--surface-3);border-radius:8px;padding:8px 10px;margin-bottom:8px;}
+.action-checklist{display:flex;flex-wrap:wrap;gap:4px 14px;width:100%;font-size:12px;}
+.action-checklist label{display:flex;align-items:center;gap:5px;white-space:nowrap;}
+.cond-field{font-size:12px;}
+.cond-field input{width:120px;}
 
 .chip-btn{background:none;border:1px solid var(--border-strong);border-radius:99px;padding:2px 9px;font-size:11px;cursor:pointer;color:var(--ink-2);}
 .chip-btn:hover{background:var(--surface-3);}
@@ -272,8 +277,12 @@ const ACTION_BY_BUCKET = {
   '22-28':'100% изъятие оборудования',
   '29+':'Суд / процедура банкротства'
 };
-const ACTION_TYPES = ['Счёт на продление выставлен','Подтверждено: возврат без продления','Звонок/переговоры','Подтверждение оплаты получено','Претензия направлена','Изъятие начато','Изъятие завершено','Передано в суд/банкротство','Прочее'];
+const ACTION_TYPES = ['Счёт на продление выставлен','Подтверждено: возврат без продления','Звонок/переговоры','Подтверждение оплаты получено','Претензия направлена','Изъятие начато','Изъятие завершено','Передано в суд/банкротство','Взыскано (сумма получена)','Возврат оборудования (тоннаж зафиксирован)','Прочее'];
 const CONFIRMED_RETURN_ACTION = 'Подтверждено: возврат без продления';
+const INVOICE_ACTION = 'Счёт на продление выставлен';
+const PAYMENT_ACTION = 'Подтверждение оплаты получено';
+const RECOVERY_ACTION = 'Взыскано (сумма получена)';
+const TONS_RETURN_ACTION = 'Возврат оборудования (тоннаж зафиксирован)';
 // "Дней просрочки"=0 в отчёте — день окончания уже ОПЛАЧЕННОГО срока аренды (не дата
 // платежа). Оплата за следующий период вносится за PROLONG_WINDOW_DAYS дней ДО этой
 // даты — т.е. сам платёж должен пройти на отметке -PROLONG_WINDOW_DAYS. Окно от
@@ -324,6 +333,77 @@ function bucketChip(bucket){
 // если он есть, иначе прогноз — так плитки не показывают ложный ноль там, где риск реален.
 function moneyAtStake(r){
   return (r.debt!==null && r.debt!==undefined) ? r.debt : (r.forecast_debt||0);
+}
+
+/* ---------- debt ledger (analytical accumulator, not a one-off extrapolation) ----------
+   1С показывает факт долга/аванса только на дату отчёта, и часто пуст на ранних стадиях
+   (клиент ещё проедает аванс). Начиная с первой же загрузки, где мы увидели контрагента,
+   долг ведётся приложением как накопитель: старт — факт долга/аванса 1С на дату первого
+   появления контрагента; дальше каждый выставленный счёт на продление (суточный платёж ×
+   число дней по счёту) сначала гасится из остатка аванса, а нехватка уходит в долг; оплата
+   и взыскание по суду вводятся вручную и уменьшают долг. Все события хранятся как отдельные
+   записи в sb_actions — итог всегда воспроизводим из истории, а не только из текущей строки
+   отчёта. */
+function toUTCDate(dateStr){ return new Date(dateStr+'T00:00:00Z'); }
+function daysBetween(fromStr, toStr){ return Math.round((toUTCDate(toStr)-toUTCDate(fromStr))/86400000); }
+function addDaysStr(dateStr, n){ const d=toUTCDate(dateStr); d.setUTCDate(d.getUTCDate()+n); return d.toISOString().slice(0,10); }
+
+function computeClientLedger(bootstrapRow, actionsForClient, latestDailyRate){
+  if(!bootstrapRow) return null;
+  let advance = bootstrapRow.advance || 0;
+  let debt = bootstrapRow.debt || 0;
+  let lastPeriodEnd = addDaysStr(bootstrapRow.report_date, -(bootstrapRow.overdue_days||0));
+  let cumulativeRecovered = 0;
+  let cumulativeTonsReturned = 0;
+  const rate = (latestDailyRate!==null && latestDailyRate!==undefined) ? latestDailyRate : (bootstrapRow.daily_payment||0);
+  const sorted = (actionsForClient||[]).slice().sort((a,b)=>{
+    if(a.action_date!==b.action_date) return a.action_date<b.action_date?-1:1;
+    return String(a.created_at||'').localeCompare(String(b.created_at||''));
+  });
+  sorted.forEach(a=>{
+    if(a.action_type===INVOICE_ACTION && a.invoice_period_end){
+      const days = daysBetween(lastPeriodEnd, a.invoice_period_end);
+      if(days>0){
+        const amount = days*rate;
+        if(advance>=amount){ advance -= amount; }
+        else { debt += (amount-advance); advance = 0; }
+        lastPeriodEnd = a.invoice_period_end;
+      }
+    } else if(a.action_type===PAYMENT_ACTION && a.payment_amount!==null && a.payment_amount!==undefined){
+      debt = Math.max(0, debt - a.payment_amount);
+    } else if(a.action_type===RECOVERY_ACTION && a.recovered_amount!==null && a.recovered_amount!==undefined){
+      debt = Math.max(0, debt - a.recovered_amount);
+      cumulativeRecovered += a.recovered_amount;
+    } else if(a.action_type===TONS_RETURN_ACTION && a.tons_returned!==null && a.tons_returned!==undefined){
+      cumulativeTonsReturned += a.tons_returned;
+    }
+  });
+  return { debt, advance, dailyRate: rate, lastPeriodEnd, cumulativeRecovered, cumulativeTonsReturned };
+}
+
+let clientLedgers = new Map();
+async function rebuildLedgers(){
+  const { data: allSnaps } = await sb.from('sb_snapshots').select('client_key,client_raw,report_date,debt,advance,daily_payment,overdue_days').order('report_date',{ascending:true});
+  const { data: allActions } = await sb.from('sb_actions').select('*').order('action_date',{ascending:true});
+  const bootstrapByClient = new Map();
+  const latestDailyByClient = new Map();
+  (allSnaps||[]).forEach(r=>{
+    if(!bootstrapByClient.has(r.client_key)) bootstrapByClient.set(r.client_key, r);
+    latestDailyByClient.set(r.client_key, r.daily_payment);
+  });
+  const actionsByClient = new Map();
+  (allActions||[]).forEach(a=>{
+    if(!actionsByClient.has(a.client_key)) actionsByClient.set(a.client_key, []);
+    actionsByClient.get(a.client_key).push(a);
+  });
+  clientLedgers = new Map();
+  bootstrapByClient.forEach((bootstrapRow, key)=>{
+    clientLedgers.set(key, computeClientLedger(bootstrapRow, actionsByClient.get(key), latestDailyByClient.get(key)));
+  });
+}
+function debtForRow(r){
+  const l = clientLedgers.get(r.client_key);
+  return l ? l.debt : moneyAtStake(r);
 }
 
 function parseWorkbookRows(rows){
@@ -538,6 +618,7 @@ async function showPeriod(reportDate, compareDate){
   dynamicsResolved = dyn.resolved;
 
   await loadLastActions();
+  await rebuildLedgers();
   document.getElementById('dashboardArea').style.display='block';
   renderKPIs();
   renderAnomalies(currentPeriodRows, previousPeriodRows);
@@ -559,7 +640,7 @@ function renderKPIs(){
   const overdue = dynamicsActive.filter(r=>r.bucket);
   const tonsOverdue = overdue.reduce((s,r)=>s+(r.weight_kg||0),0)/1000;
   const tonsTotal = dynamicsActive.reduce((s,r)=>s+(r.weight_kg||0),0)/1000;
-  const debtOverdue = overdue.reduce((s,r)=>s+(r.debt||0),0);
+  const debtOverdue = overdue.reduce((s,r)=>s+debtForRow(r),0);
   const worse = dynamicsActive.filter(r=>r.status==='worse').length;
   const better = dynamicsActive.filter(r=>r.status==='better').length;
   const isNew = dynamicsActive.filter(r=>r.status==='new').length;
@@ -571,7 +652,7 @@ function renderKPIs(){
     ['На продлении (до просрочки)', prolongCount, 'заканчивается оплаченный срок'],
     ['Контрагентов в просрочке', overdue.length, ''],
     ['Тоннаж в просрочке', fmtTons(tonsOverdue), 'из ' + fmtTons(tonsTotal) + ' у клиентов (' + nf1.format(pct) + '%)'],
-    ['Долг просроченных, ₽', fmtRub(debtOverdue), ''],
+    ['Долг просроченных (накоплено), ₽', fmtRub(debtOverdue), 'считается приложением: аванс+долг 1С на старте, дальше — счета/оплаты/взыскания'],
     ['Ухудшилось', worse, 'за период'],
     ['Улучшилось', better, 'за период'],
     ['Новые в просрочке', isNew, ''],
@@ -630,7 +711,7 @@ function renderDeptTargets(){
   const b2228 = dynamicsActive.filter(r=>r.bucket==='22-28' && !isConfirmedReturn(r.client_key));
   const b29 = dynamicsActive.filter(r=>r.bucket==='29+' && !isConfirmedReturn(r.client_key));
 
-  const sumMoney = rows => rows.reduce((s,r)=>s+moneyAtStake(r),0);
+  const sumMoney = rows => rows.reduce((s,r)=>s+debtForRow(r),0);
   const sumTons = rows => rows.reduce((s,r)=>s+(r.weight_kg||0),0)/1000;
   const needsAction = (rows, doneTypes) => rows.filter(r=>{
     const a = lastActionByClient.get(r.client_key);
@@ -641,12 +722,18 @@ function renderDeptTargets(){
   const seizureRows = b1521.concat(b2228);
   const seizurePending = needsAction(seizureRows, ['Изъятие начато','Изъятие завершено']);
   const courtPending = needsAction(b29, ['Передано в суд/банкротство']);
+  // 29+ — риск это и деньги, и тоннаж сразу: часть безнадёжных в суде взыскивается
+  // деньгами, часть — физическим изъятием оборудования; отражаем оба канала и то,
+  // что по ним уже фактически получено/возвращено, а не только то, что осталось.
+  const sumLedger = (rows, field) => rows.reduce((s,r)=>{ const l = clientLedgers.get(r.client_key); return s + (l ? (l[field]||0) : 0); }, 0);
+  const b29Recovered = sumLedger(b29, 'cumulativeRecovered');
+  const b29TonsReturned = sumLedger(b29, 'cumulativeTonsReturned');
 
   const tiles = [
     ['Продление · 0–7 дней', fmtRub(sumMoney(b07)), b07.length+' контрагентов — собрать до эскалации в претензию'],
     ['Претензии · 8–14 дней', claimPending.length+' из '+b0814.length, 'ещё не направлена; под риском '+fmtRub(sumMoney(b0814))],
     ['Изъятие · 15–28 дней', fmtTons(sumTons(seizureRows)), seizurePending.length+' из '+seizureRows.length+' — не начато/не завершено'],
-    ['Взыскание (суд) · 29+', fmtRub(sumMoney(b29)), courtPending.length+' из '+b29.length+' — ещё не передано в суд'],
+    ['Взыскание (суд) · 29+', fmtRub(sumMoney(b29))+' + '+fmtTons(sumTons(b29))+' под риском', courtPending.length+' из '+b29.length+' — ещё не передано в суд; уже взыскано '+fmtRub(b29Recovered)+', возвращено '+fmtTons(b29TonsReturned)],
   ];
   document.getElementById('deptRow').innerHTML = tiles.map(t=>
     '<div class="kpi"><div class="label">'+t[0]+'</div><div class="value">'+t[1]+'</div><div class="sub">'+t[2]+'</div></div>'
@@ -661,14 +748,14 @@ function computeStageEfficiency(previousRows){
     const was = (previousRows||[]).filter(p=>p.bucket===b);
     let resolvedCount=0, resolvedDebt=0, betterCount=0, sameCount=0, worseCount=0;
     was.forEach(p=>{
-      if(resolvedKeys.has(p.client_key)){ resolvedCount++; resolvedDebt += moneyAtStake(p); return; }
+      if(resolvedKeys.has(p.client_key)){ resolvedCount++; resolvedDebt += debtForRow(p); return; }
       const cur = activeByKey.get(p.client_key);
       if(!cur) return;
       if(cur.status==='better') betterCount++;
       else if(cur.status==='same') sameCount++;
       else if(cur.status==='worse') worseCount++;
     });
-    const totalDebt = was.reduce((s,p)=>s+moneyAtStake(p),0);
+    const totalDebt = was.reduce((s,p)=>s+debtForRow(p),0);
     const convPct = totalDebt>0 ? (resolvedDebt/totalDebt*100) : null;
     return { bucket:b, count: was.length, totalDebt, resolvedCount, betterCount, sameCount, worseCount, convPct };
   });
@@ -717,10 +804,10 @@ function renderMainTable(){
   const table = document.getElementById('mainTable');
   let h = '<thead><tr>'
     + '<th>Контрагент</th><th>Статус</th><th>Дней просрочки</th><th>Стадия</th>'
-    + '<th>Долг, ₽</th><th>Δ долга</th><th>Тоннаж, т</th><th>Рекомендуемое действие</th><th>Последнее действие</th><th></th>'
+    + '<th>Суточный платёж</th><th>Долг (1С), ₽</th><th>Δ долга (1С)</th><th>Долг (накоплено), ₽</th><th>Тоннаж, т</th><th>Рекомендуемое действие</th><th>Последнее действие</th><th></th>'
     + '</tr></thead><tbody>';
   if(!rows.length){
-    h += '<tr><td colspan="10" style="color:var(--ink-muted);">Никого не найдено по текущим фильтрам.</td></tr>';
+    h += '<tr><td colspan="12" style="color:var(--ink-muted);">Никого не найдено по текущим фильтрам.</td></tr>';
   }
   rows.forEach(r=>{
     const deltaDebt = (r.debt||0) - (r.prev ? (r.prev.debt||0) : 0);
@@ -736,15 +823,17 @@ function renderMainTable(){
       + '<td><span class="badge st-'+r.status+'">'+STATUS_LABEL[r.status]+'</span></td>'
       + '<td class="num">'+(r.prev?fmtDays(r.prev.overdue_days)+'<span class="arrow">→</span>':'')+fmtDays(r.overdue_days)+'</td>'
       + '<td>'+(r.prev?bucketChip(r.prev.bucket)+'<span class="arrow">→</span>':'')+bucketChip(r.bucket)+'</td>'
+      + '<td class="num">'+fmtRub(r.daily_payment)+'</td>'
       + '<td class="num">'+fmtRub(r.debt)+'</td>'
       + '<td class="num">'+deltaText+'</td>'
+      + '<td class="num">'+fmtRub(debtForRow(r))+'</td>'
       + '<td class="num">'+fmtTons((r.weight_kg||0)/1000)+'</td>'
       + '<td class="action-col">'+recommendedAction+'</td>'
       + '<td class="action-col">'+lastActionText+'</td>'
       + '<td><button class="chip-btn" data-toggle="'+encodeURIComponent(r.client_key)+'">Журнал</button></td>'
       + '</tr>';
     if(expandedClientKey === r.client_key){
-      h += '<tr class="log-row" data-logfor="'+encodeURIComponent(r.client_key)+'"><td colspan="10"><div class="log-box" id="logbox-placeholder"></div></td></tr>';
+      h += '<tr class="log-row" data-logfor="'+encodeURIComponent(r.client_key)+'"><td colspan="12"><div class="log-box" id="logbox-placeholder"></div></td></tr>';
     }
   });
   h += '</tbody>';
@@ -760,44 +849,114 @@ function renderMainTable(){
   });
 }
 
+function actionExtraText(a){
+  const parts = [];
+  if(a.invoice_period_end) parts.push('по '+fmtDate(a.invoice_period_end));
+  if(a.payment_amount!==null && a.payment_amount!==undefined) parts.push(fmtRub(a.payment_amount));
+  if(a.recovered_amount!==null && a.recovered_amount!==undefined) parts.push(fmtRub(a.recovered_amount));
+  if(a.tons_returned!==null && a.tons_returned!==undefined) parts.push(fmtTons(a.tons_returned));
+  return parts.length ? ' ('+parts.join(', ')+')' : '';
+}
+
 async function renderActionLog(clientKey){
-  const row = dynamicsActive.find(r=>r.client_key===clientKey);
+  const clientRow = dynamicsActive.find(r=>r.client_key===clientKey) || dynamicsResolved.find(r=>r.client_key===clientKey);
   const tr = document.querySelector('tr[data-logfor="'+encodeURIComponent(clientKey)+'"]');
   if(!tr) return;
   const box = tr.querySelector('.log-box');
   box.innerHTML = 'Загрузка…';
   const { data, error } = await sb.from('sb_actions').select('*').eq('client_key', clientKey).order('action_date',{ascending:false});
-  let html = '<div style="font-weight:600;margin-bottom:6px;">'+ (row?row.client_raw:clientKey) +'</div>';
+  const ledger = clientLedgers.get(clientKey);
+  let html = '<div style="font-weight:600;margin-bottom:6px;">'+ (clientRow?clientRow.client_raw:clientKey) +'</div>';
+  html += '<div class="ledger-summary">'
+    + '<div><b>Долг (накоплено):</b> '+fmtRub(ledger?ledger.debt:null)+'</div>'
+    + '<div><b>Остаток аванса:</b> '+fmtRub(ledger?ledger.advance:null)+'</div>'
+    + '<div><b>Суточный платёж:</b> '+fmtRub(ledger?ledger.dailyRate:null)+'/сут</div>'
+    + '<div><b>Оплачен период по:</b> '+fmtDate(ledger?ledger.lastPeriodEnd:null)+'</div>'
+    + '<div><b>Взыскано всего:</b> '+fmtRub(ledger?ledger.cumulativeRecovered:0)+'</div>'
+    + '<div><b>Возвращено тоннажа:</b> '+fmtTons(ledger?ledger.cumulativeTonsReturned:0)+'</div>'
+    + '</div>';
   if(error){ html += '<div class="note warn">Ошибка загрузки журнала.</div>'; }
   else if(!data || !data.length){ html += '<div class="note">Действий пока не зафиксировано.</div>'; }
   else {
-    html += (data||[]).map(a=>'<div class="log-entry"><span class="date">'+fmtDate(a.action_date)+'</span><span>'+a.action_type+(a.comment?' — '+a.comment:'')+'</span>'
+    html += (data||[]).map(a=>'<div class="log-entry"><span class="date">'+fmtDate(a.action_date)+'</span><span>'+a.action_type+actionExtraText(a)+(a.comment?' — '+a.comment:'')+'</span>'
       + (a.created_by_email?'<span style="margin-left:auto;color:var(--ink-muted);">'+emailToLogin(a.created_by_email)+'</span>':'')
       + '</div>').join('');
   }
   html += '<div class="log-form">'
-    + '<select id="newActionType">'+ACTION_TYPES.map(t=>'<option>'+t+'</option>').join('')+'</select>'
+    + '<div class="action-checklist">'+ACTION_TYPES.map(t=>'<label class="chk-item"><input type="checkbox" class="actionChk" value="'+t+'"> '+t+'</label>').join('')+'</div>'
+    + '<div id="invoiceEndWrap" class="cond-field" style="display:none;"><label>Оплачен по дату: <input type="date" id="invoiceEndDate"></label></div>'
+    + '<div id="paymentAmountWrap" class="cond-field" style="display:none;"><label>Сумма оплаты, ₽: <input type="number" id="paymentAmountInput" min="0" step="1"></label></div>'
+    + '<div id="recoveredAmountWrap" class="cond-field" style="display:none;"><label>Взыскано, ₽: <input type="number" id="recoveredAmountInput" min="0" step="1"></label></div>'
+    + '<div id="tonsReturnedWrap" class="cond-field" style="display:none;"><label>Возвращено, т: <input type="number" id="tonsReturnedInput" min="0" step="0.1"></label></div>'
     + '<input type="date" id="newActionDate" value="'+new Date().toISOString().slice(0,10)+'">'
     + '<textarea id="newActionComment" placeholder="Комментарий (необязательно)"></textarea>'
     + '<button class="btn primary small" id="saveActionBtn">Сохранить</button>'
     + '</div>';
   box.innerHTML = html;
 
-  document.getElementById('saveActionBtn').addEventListener('click', async ()=>{
-    const { data:{ session } } = await sb.auth.getSession();
-    const actionType = document.getElementById('newActionType').value;
-    const actionDate = document.getElementById('newActionDate').value;
-    const comment = document.getElementById('newActionComment').value.trim();
-    const { error:insErr } = await sb.from('sb_actions').insert({
-      client_key: clientKey, client_raw: row?row.client_raw:clientKey,
-      action_type: actionType, action_date: actionDate, comment: comment||null,
-      created_by: session.user.id, created_by_email: session.user.email
+  function chkFor(type){ return box.querySelector('.actionChk[value="'+type.replace(/"/g,'&quot;')+'"]'); }
+  function syncCondField(type, wrapId){
+    const chk = chkFor(type), wrap = document.getElementById(wrapId);
+    if(chk && wrap) wrap.style.display = chk.checked ? '' : 'none';
+  }
+  box.querySelectorAll('.actionChk').forEach(chk=>{
+    chk.addEventListener('change', ()=>{
+      syncCondField(INVOICE_ACTION, 'invoiceEndWrap');
+      syncCondField(PAYMENT_ACTION, 'paymentAmountWrap');
+      syncCondField(RECOVERY_ACTION, 'recoveredAmountWrap');
+      syncCondField(TONS_RETURN_ACTION, 'tonsReturnedWrap');
     });
+  });
+
+  document.getElementById('saveActionBtn').addEventListener('click', async ()=>{
+    const checked = [...box.querySelectorAll('.actionChk:checked')].map(c=>c.value);
+    if(!checked.length){ alert('Отметьте хотя бы одно действие.'); return; }
+    const actionDate = document.getElementById('newActionDate').value;
+    if(!actionDate){ alert('Укажите дату действия.'); return; }
+    const comment = document.getElementById('newActionComment').value.trim();
+
+    let invoiceEndDate = null, paymentAmount = null, recoveredAmount = null, tonsReturned = null;
+    if(checked.indexOf(INVOICE_ACTION)!==-1){
+      invoiceEndDate = document.getElementById('invoiceEndDate').value;
+      if(!invoiceEndDate){ alert('Укажите дату, по которую выставлен счёт.'); return; }
+      if(ledger && invoiceEndDate<=ledger.lastPeriodEnd){ alert('Дата счёта должна быть позже уже учтённого периода ('+fmtDate(ledger.lastPeriodEnd)+').'); return; }
+    }
+    if(checked.indexOf(PAYMENT_ACTION)!==-1){
+      const v = Number(document.getElementById('paymentAmountInput').value);
+      if(!v || v<=0){ alert('Укажите сумму оплаты.'); return; }
+      paymentAmount = v;
+    }
+    if(checked.indexOf(RECOVERY_ACTION)!==-1){
+      const v = Number(document.getElementById('recoveredAmountInput').value);
+      if(!v || v<=0){ alert('Укажите взысканную сумму.'); return; }
+      recoveredAmount = v;
+    }
+    if(checked.indexOf(TONS_RETURN_ACTION)!==-1){
+      const v = Number(document.getElementById('tonsReturnedInput').value);
+      if(!v || v<=0){ alert('Укажите возвращённый тоннаж.'); return; }
+      tonsReturned = v;
+    }
+
+    const { data:{ session } } = await sb.auth.getSession();
+    const rows = checked.map(actionType=>{
+      const rec = {
+        client_key: clientKey, client_raw: clientRow?clientRow.client_raw:clientKey,
+        action_type: actionType, action_date: actionDate, comment: comment||null,
+        created_by: session.user.id, created_by_email: session.user.email
+      };
+      if(actionType===INVOICE_ACTION) rec.invoice_period_end = invoiceEndDate;
+      if(actionType===PAYMENT_ACTION) rec.payment_amount = paymentAmount;
+      if(actionType===RECOVERY_ACTION) rec.recovered_amount = recoveredAmount;
+      if(actionType===TONS_RETURN_ACTION) rec.tons_returned = tonsReturned;
+      return rec;
+    });
+    const { error:insErr } = await sb.from('sb_actions').insert(rows);
     if(insErr){ alert('Ошибка сохранения: '+insErr.message); return; }
     await loadLastActions();
-    // Действие могло изменить KPI, плановые показатели по отделам и статус в окне
-    // продления (например, "подтверждён возврат") — перерисовываем всё агрегированное,
-    // не только таблицу, где была открыта карточка.
+    await rebuildLedgers();
+    // Действие могло изменить KPI, плановые показатели по отделам, накопленный долг
+    // и статус в окне продления (например, "подтверждён возврат") — перерисовываем
+    // всё агрегированное, не только таблицу, где была открыта карточка.
     renderKPIs();
     renderDeptTargets();
     renderProlongTable();
