@@ -1,0 +1,721 @@
+<title>СБ — динамика просрочки</title>
+<style>
+:root{
+  color-scheme: light;
+  --bg:#F3F4F1; --surface:#FFFFFF; --surface-2:#ECEEEA; --surface-3:#E3E6E1;
+  --ink:#14181A; --ink-2:#4B534E; --ink-muted:#838A83;
+  --border:rgba(20,24,26,0.12); --border-strong:rgba(20,24,26,0.22);
+  --accent:#2a78d6; --accent-ink:#ffffff;
+  --div-pos:#2a78d6; --div-neg:#e34948; --div-mid:#f0efec;
+  --good:#0ca30c; --warning:#c98500; --serious:#d9622c; --critical:#d03b3b;
+  --radius:10px; --radius-sm:6px;
+  --font-ui: system-ui,-apple-system,"Segoe UI",sans-serif;
+  --font-mono: ui-monospace,"Cascadia Mono","Consolas","SFMono-Regular",monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    color-scheme: dark;
+    --bg:#12161A; --surface:#1A2024; --surface-2:#202830; --surface-3:#242C34;
+    --ink:#ECEFEC; --ink-2:#A9B2AC; --ink-muted:#7C8680;
+    --border:rgba(255,255,255,0.12); --border-strong:rgba(255,255,255,0.22);
+    --accent:#3987e5; --accent-ink:#08131f;
+    --div-pos:#3987e5; --div-neg:#e66767; --div-mid:#383835;
+    --good:#0ca30c; --warning:#c98500; --serious:#d9622c; --critical:#d03b3b;
+  }
+}
+:root[data-theme="dark"]{
+  color-scheme: dark;
+  --bg:#12161A; --surface:#1A2024; --surface-2:#202830; --surface-3:#242C34;
+  --ink:#ECEFEC; --ink-2:#A9B2AC; --ink-muted:#7C8680;
+  --border:rgba(255,255,255,0.12); --border-strong:rgba(255,255,255,0.22);
+  --accent:#3987e5; --accent-ink:#08131f;
+  --div-pos:#3987e5; --div-neg:#e66767; --div-mid:#383835;
+  --good:#0ca30c; --warning:#c98500; --serious:#d9622c; --critical:#d03b3b;
+}
+:root[data-theme="light"]{
+  color-scheme: light;
+  --bg:#F3F4F1; --surface:#FFFFFF; --surface-2:#ECEEEA; --surface-3:#E3E6E1;
+  --ink:#14181A; --ink-2:#4B534E; --ink-muted:#838A83;
+  --border:rgba(20,24,26,0.12); --border-strong:rgba(20,24,26,0.22);
+  --accent:#2a78d6; --accent-ink:#ffffff;
+  --div-pos:#2a78d6; --div-neg:#e34948; --div-mid:#f0efec;
+  --good:#0ca30c; --warning:#c98500; --serious:#d9622c; --critical:#d03b3b;
+}
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;}
+body{background:var(--bg);color:var(--ink);font-family:var(--font-ui);font-size:14px;line-height:1.45;-webkit-font-smoothing:antialiased;}
+h1,h2,h3{text-wrap:balance;margin:0;}
+.app{max-width:1440px;margin:0 auto;padding:28px 24px 80px;}
+header.top{margin-bottom:20px;}
+header.top h1{font-size:24px;font-weight:700;letter-spacing:-0.01em;}
+header.top p{margin:6px 0 0;color:var(--ink-2);font-size:13.5px;max-width:80ch;}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:18px 20px;}
+.card + .card{margin-top:16px;}
+.card h2{font-size:12px;text-transform:uppercase;letter-spacing:0.07em;color:var(--ink-2);font-weight:700;margin-bottom:14px;}
+.card h2 .hint{text-transform:none;letter-spacing:0;color:var(--ink-muted);font-weight:400;font-size:12px;margin-left:8px;}
+.field-row{display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap;}
+.field-row label{color:var(--ink-2);font-size:13px;}
+input[type=number],input[type=text],input[type=date],input[type=email],input[type=password],select,textarea{
+  font:inherit;font-family:var(--font-mono);font-size:13.5px;color:var(--ink);
+  background:var(--bg);border:1px solid var(--border-strong);border-radius:var(--radius-sm);
+  padding:6px 9px;font-variant-numeric:tabular-nums;
+}
+input[type=text],select,textarea{font-family:var(--font-ui);}
+input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid var(--accent);outline-offset:1px;}
+.btn{appearance:none;border:1px solid var(--border-strong);background:var(--surface-2);color:var(--ink);font:inherit;font-weight:600;font-size:12.5px;padding:7px 13px;border-radius:var(--radius-sm);cursor:pointer;}
+.btn:hover{background:var(--surface-3);}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink);}
+.btn.primary:hover{filter:brightness(1.06);}
+.btn.small{padding:4px 9px;font-size:11.5px;}
+.note{font-size:11.5px;color:var(--ink-muted);margin-top:6px;}
+.note.warn{color:var(--critical);}
+
+/* auth (shared pattern) */
+.auth-screen{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:var(--bg);z-index:100;padding:20px;}
+.auth-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:28px;width:100%;max-width:360px;display:flex;flex-direction:column;gap:10px;box-shadow:0 8px 30px rgba(0,0,0,0.12);}
+.auth-card h1{font-size:19px;font-weight:700;}
+.auth-card p{color:var(--ink-2);font-size:12.5px;margin:0 0 4px;}
+.auth-card input{width:100%;}
+.auth-error{color:var(--critical);font-size:12px;min-height:16px;line-height:1.4;}
+.auth-note{color:var(--ink-muted);font-size:11.5px;min-height:14px;line-height:1.4;}
+.auth-actions{display:flex;gap:8px;margin-top:2px;}
+.auth-actions .btn{flex:1;}
+.userbar{display:flex;justify-content:flex-end;align-items:center;gap:10px;font-size:12.5px;color:var(--ink-2);margin-bottom:8px;}
+.userbar .email{font-family:var(--font-mono);}
+
+/* KPI row */
+.kpi-row{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px;}
+@media (max-width:1000px){.kpi-row{grid-template-columns:repeat(2,1fr);}}
+.kpi{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:13px 15px;}
+.kpi .label{font-size:11px;text-transform:uppercase;letter-spacing:0.05em;color:var(--ink-muted);font-weight:600;margin-bottom:6px;}
+.kpi .value{font-family:var(--font-mono);font-size:19px;font-weight:700;font-variant-numeric:tabular-nums;letter-spacing:-0.01em;}
+.kpi .sub{font-size:11px;color:var(--ink-muted);margin-top:4px;}
+
+/* status badges */
+.badge{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:700;letter-spacing:0.02em;padding:3px 8px;border-radius:99px;white-space:nowrap;}
+.badge::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor;display:inline-block;}
+.badge.st-worse{background:color-mix(in srgb, var(--critical) 16%, transparent);color:var(--critical);}
+.badge.st-better{background:color-mix(in srgb, var(--good) 16%, transparent);color:var(--good);}
+.badge.st-same{background:var(--surface-3);color:var(--ink-2);}
+.badge.st-new{background:color-mix(in srgb, var(--warning) 20%, transparent);color:var(--warning);}
+.badge.st-resolved{background:color-mix(in srgb, var(--good) 16%, transparent);color:var(--good);}
+.bucket-chip{display:inline-block;font-family:var(--font-mono);font-size:11px;font-weight:700;padding:2px 7px;border-radius:6px;background:var(--surface-3);color:var(--ink-2);}
+.bucket-chip.b-none{color:var(--ink-muted);}
+.bucket-chip.b-0-7{background:color-mix(in srgb, var(--warning) 18%, transparent);color:var(--warning);}
+.bucket-chip.b-8-14{background:color-mix(in srgb, var(--serious) 18%, transparent);color:var(--serious);}
+.bucket-chip.b-15-21{background:color-mix(in srgb, var(--critical) 14%, transparent);color:var(--critical);}
+.bucket-chip.b-22-28{background:color-mix(in srgb, var(--critical) 22%, transparent);color:var(--critical);}
+.bucket-chip.b-29-{background:var(--critical);color:#fff;}
+.arrow{color:var(--ink-muted);margin:0 3px;font-size:11px;}
+
+/* filters */
+.filters{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px;}
+.filters input[type=text]{width:220px;}
+.filters label{display:flex;align-items:center;gap:5px;font-size:12.5px;color:var(--ink-2);}
+
+/* table */
+.table-wrap{overflow-x:auto;border:1px solid var(--border);border-radius:var(--radius);}
+table.dyn{border-collapse:collapse;width:100%;font-size:12.5px;white-space:nowrap;}
+table.dyn th,table.dyn td{padding:8px 10px;border-bottom:1px solid var(--border);text-align:left;}
+table.dyn thead th{background:var(--surface-2);color:var(--ink-2);font-weight:600;font-size:10.5px;text-transform:uppercase;letter-spacing:0.04em;position:sticky;top:0;cursor:pointer;}
+table.dyn tbody tr:hover{background:var(--surface-2);}
+table.dyn td.num{font-family:var(--font-mono);font-variant-numeric:tabular-nums;text-align:right;}
+table.dyn td.client{white-space:normal;max-width:260px;font-weight:600;}
+table.dyn td .manager{display:block;font-weight:400;color:var(--ink-muted);font-size:11px;}
+table.dyn td.action-col{white-space:normal;max-width:220px;color:var(--ink-2);}
+tr.log-row td{background:var(--surface-2);white-space:normal;}
+.log-box{padding:10px 4px;}
+.log-entry{display:flex;gap:8px;font-size:12px;padding:4px 0;border-bottom:1px dashed var(--border);color:var(--ink-2);}
+.log-entry:last-child{border-bottom:none;}
+.log-entry .date{font-family:var(--font-mono);color:var(--ink-muted);white-space:nowrap;}
+.log-form{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:8px;}
+.log-form textarea{width:220px;height:32px;resize:vertical;}
+
+.chip-btn{background:none;border:1px solid var(--border-strong);border-radius:99px;padding:2px 9px;font-size:11px;cursor:pointer;color:var(--ink-2);}
+.chip-btn:hover{background:var(--surface-3);}
+
+.upload-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;}
+</style>
+
+<div id="authScreen" class="auth-screen">
+  <div class="auth-card">
+    <h1>СБ — динамика просрочки</h1>
+    <p>Вход для сотрудников. Логин/пароль общие с остальными внутренними инструментами компании.</p>
+    <div id="normalAuthFields">
+      <input type="text" id="authEmail" placeholder="Логин (латиницей, без пробелов)" autocomplete="username">
+      <input type="password" id="authPassword" placeholder="Пароль" autocomplete="current-password">
+      <div class="auth-error" id="authError"></div>
+      <div class="auth-note" id="authNote"></div>
+      <div class="auth-actions">
+        <button class="btn primary" id="signInBtn">Войти</button>
+        <button class="btn" id="signUpBtn">Зарегистрироваться</button>
+      </div>
+      <p style="margin-top:10px;text-align:center;font-size:12px;color:var(--ink-muted);">Забыли пароль — обратитесь к администратору.</p>
+    </div>
+  </div>
+</div>
+
+<div class="app" id="appRoot" style="display:none;">
+  <header class="top">
+    <div class="userbar">
+      <span class="email" id="userEmail"></span>
+      <button class="btn" id="signOutBtn">Выйти</button>
+    </div>
+    <h1>СБ — динамика просрочки</h1>
+    <p>Раз в неделю загружайте файл «отчёт СБ» из 1С — инструмент сам классифицирует стадию по каждому контрагенту (0–7 / 8–14 / 15–21 / 22–28 / 29+ дней) и сравнивает с прошлой загрузкой: кто ухудшился, кто оплатил, кто новый. Ниже — журнал произведённых действий по каждому контрагенту.</p>
+  </header>
+
+  <div class="card">
+    <h2>Загрузка отчёта <span class="hint">файл «отчёт СБ», как выгружается из 1С</span></h2>
+    <div class="upload-row">
+      <input type="file" id="fileInput" accept=".xlsx,.xls">
+      <label>Дата отчёта: <input type="date" id="reportDateInput"></label>
+      <button class="btn primary" id="uploadBtn">Загрузить и обработать</button>
+    </div>
+    <div class="note" id="uploadStatus"></div>
+  </div>
+
+  <div class="card">
+    <h2>Период</h2>
+    <div class="field-row">
+      <label for="periodSelect">Показать динамику на дату:</label>
+      <select id="periodSelect"><option value="">— нет загруженных отчётов —</option></select>
+      <span class="note" id="periodNote" style="margin:0;"></span>
+    </div>
+  </div>
+
+  <div id="dashboardArea" style="display:none;">
+    <div class="kpi-row" id="kpiRow"></div>
+
+    <div class="card">
+      <h2>Задачи по отделам на этот период <span class="hint">считается из текущих данных — не отдельный ручной план</span></h2>
+      <div class="kpi-row" id="deptRow"></div>
+    </div>
+
+    <div class="card">
+      <h2>Эффективность по стадиям <span class="hint">что случилось с теми, кто был в стадии на прошлой загрузке — конверсия в деньги/тонны</span></h2>
+      <div class="table-wrap"><table class="dyn" id="efficiencyTable"></table></div>
+    </div>
+
+    <div class="card">
+      <h2>Контрагенты в просрочке <span class="hint">по умолчанию — сначала ухудшившиеся</span></h2>
+      <div class="filters">
+        <input type="text" id="searchInput" placeholder="Поиск по названию…">
+        <label><input type="checkbox" id="onlyWorseChk"> только ухудшившиеся</label>
+        <select id="bucketFilter">
+          <option value="">Все стадии</option>
+          <option value="0-7">0–7 дней</option>
+          <option value="8-14">8–14 дней (претензия)</option>
+          <option value="15-21">15–21 день (начало изъятия)</option>
+          <option value="22-28">22–28 дней (изъятие)</option>
+          <option value="29+">29+ (красная линия)</option>
+        </select>
+      </div>
+      <div class="table-wrap"><table class="dyn" id="mainTable"></table></div>
+    </div>
+
+    <div class="card">
+      <h2>Погашено / выбыло из просрочки за период <span class="hint">были в прошлой загрузке, отсутствуют в текущей</span></h2>
+      <div class="table-wrap"><table class="dyn" id="resolvedTable"></table></div>
+    </div>
+  </div>
+</div>
+
+<script src="https://unpkg.com/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="https://unpkg.com/@supabase/supabase-js@2"></script>
+<script>
+(function(){
+"use strict";
+
+const SUPABASE_URL = "https://khzxfhxpcrjshsssghok.supabase.co";
+const SUPABASE_ANON_KEY = "sb_publishable_rrwlI1VXeWmQJ1Zn3YT3Ow_pUK04-ha";
+const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+const LOGIN_DOMAIN = '@opalubka.invalid';
+function loginToEmail(login){ return login.trim().toLowerCase().replace(/[^a-z0-9_.-]/g,'') + LOGIN_DOMAIN; }
+function emailToLogin(email){ return (email||'').split('@')[0]; }
+const LOGIN_PATTERN = /^[a-z0-9_.-]{3,}$/i;
+function validateLogin(login){
+  if(!login) return 'Введите логин.';
+  if(!LOGIN_PATTERN.test(login)) return 'Логин — только латинские буквы, цифры, «.», «-», «_», не короче 3 символов.';
+  return null;
+}
+
+const nf0 = new Intl.NumberFormat('ru-RU',{maximumFractionDigits:0});
+const nf1 = new Intl.NumberFormat('ru-RU',{maximumFractionDigits:1});
+function fmtRub(v){ return (v===null||v===undefined||!isFinite(v)) ? '—' : nf0.format(Math.round(v))+' ₽'; }
+function fmtTons(v){ return (v===null||v===undefined||!isFinite(v)) ? '—' : nf1.format(v)+' т'; }
+function fmtDays(v){ return (v===null||v===undefined||!isFinite(v)) ? '—' : nf1.format(v); }
+function fmtDate(d){ if(!d) return '—'; const dt = new Date(d); return dt.toLocaleDateString('ru-RU'); }
+
+/* ---------- domain logic ---------- */
+const BUCKET_LABELS = ['0-7','8-14','15-21','22-28','29+'];
+const BUCKET_TITLES = {'0-7':'0–7 дней','8-14':'8–14 дней','15-21':'15–21 день','22-28':'22–28 дней','29+':'29+ дней'};
+const ACTION_BY_BUCKET = {
+  'null':'—',
+  '0-7':'Звонки, переговоры, подтверждение оплаты (до 8-го дня)',
+  '8-14':'Претензия',
+  '15-21':'Начало изъятия оборудования',
+  '22-28':'100% изъятие оборудования',
+  '29+':'Суд / процедура банкротства'
+};
+const ACTION_TYPES = ['Звонок/переговоры','Подтверждение оплаты получено','Претензия направлена','Изъятие начато','Изъятие завершено','Передано в суд/банкротство','Прочее'];
+
+function normalizeClient(name){
+  return String(name).replace(/\([^)]*\)/g,'').trim().replace(/\s+/g,' ').toUpperCase();
+}
+function extractManager(name){
+  const m = String(name).match(/\(([^)]*)\)/);
+  return m ? m[1] : null;
+}
+function toNum(v){
+  if(v===null||v===undefined||v==='') return null;
+  const n = Number(v);
+  return isFinite(n) ? n : null;
+}
+function bucketFromRow(r){
+  for(let i=0;i<5;i++){
+    const v = r[10+i];
+    if(v!==null && v!==undefined && v!=='') return BUCKET_LABELS[i];
+  }
+  return null;
+}
+function severityOf(bucket){
+  const order = {'null':0,'0-7':1,'8-14':2,'15-21':3,'22-28':4,'29+':5};
+  return order[bucket===null?'null':bucket] || 0;
+}
+function bucketClass(bucket){
+  return 'bucket-chip ' + (bucket ? 'b-'+bucket.replace('+','-') : 'b-none');
+}
+function bucketChip(bucket){
+  return '<span class="'+bucketClass(bucket)+'">'+(bucket?BUCKET_TITLES[bucket]:'не просрочен')+'</span>';
+}
+// На ранних стадиях (0–7, 8–14 дней) "Задолженность" в 1С часто пуста — клиент ещё
+// проедает аванс, формальный долг не зафиксирован. "Прогноз задолженности" считается
+// всегда, поэтому для агрегированных сумм (сколько денег под риском) используем факт,
+// если он есть, иначе прогноз — так плитки не показывают ложный ноль там, где риск реален.
+function moneyAtStake(r){
+  return (r.debt!==null && r.debt!==undefined) ? r.debt : (r.forecast_debt||0);
+}
+
+function parseWorkbookRows(rows){
+  const header = rows[0]||[];
+  if(!header[0] || String(header[0]).indexOf('Клиент')===-1 || header.length<15){
+    throw new Error('Файл не похож на «отчёт СБ» — проверьте, что выбран правильный экспорт из 1С.');
+  }
+  const dataRows = rows.slice(1).filter(r=>r && r[0] && String(r[0]).trim()!=='');
+  return dataRows.map(r=>({
+    client_raw: String(r[0]).trim(),
+    client_key: normalizeClient(r[0]),
+    manager: extractManager(r[0]),
+    debt: toNum(r[2]),
+    advance: toNum(r[3]),
+    deposit: toNum(r[4]),
+    equipment_value: toNum(r[5]),
+    daily_payment: toNum(r[6]),
+    forecast_debt: toNum(r[7]),
+    weight_kg: toNum(r[8]),
+    overdue_days: toNum(r[9]),
+    bucket: bucketFromRow(r)
+  }));
+}
+
+function computeDynamics(currentRows, previousRows){
+  const prevMap = new Map((previousRows||[]).map(r=>[r.client_key, r]));
+  const currMap = new Map(currentRows.map(r=>[r.client_key, r]));
+  const active = currentRows.map(cur=>{
+    const prev = prevMap.get(cur.client_key) || null;
+    let status;
+    if(!prev) status = 'new';
+    else {
+      const sp = severityOf(prev.bucket), sc = severityOf(cur.bucket);
+      status = sc>sp ? 'worse' : (sc<sp ? 'better' : 'same');
+    }
+    return Object.assign({}, cur, {prev, status});
+  });
+  const resolved = (previousRows||[]).filter(p=>!currMap.has(p.client_key));
+  return {active, resolved};
+}
+
+const STATUS_LABEL = {worse:'Ухудшение', better:'Улучшение', same:'Без изменений', new:'Новый'};
+const STATUS_WEIGHT = {worse:3, new:2, same:1, better:0};
+
+function sortActive(rows){
+  return rows.slice().sort((a,b)=>{
+    const wa=STATUS_WEIGHT[a.status], wb=STATUS_WEIGHT[b.status];
+    if(wa!==wb) return wb-wa;
+    const sa=severityOf(a.bucket), sb=severityOf(b.bucket);
+    if(sa!==sb) return sb-sa;
+    return (b.weight_kg||0)-(a.weight_kg||0);
+  });
+}
+
+/* ---------- app state ---------- */
+let uploadsList = []; // deduped by date, sorted desc
+let currentPeriodRows = [];
+let previousPeriodRows = [];
+let dynamicsActive = [];
+let dynamicsResolved = [];
+let lastActionByClient = new Map();
+let expandedClientKey = null;
+
+const authScreen = document.getElementById('authScreen');
+const appRoot = document.getElementById('appRoot');
+const authEmail = document.getElementById('authEmail');
+const authPassword = document.getElementById('authPassword');
+const authError = document.getElementById('authError');
+const authNote = document.getElementById('authNote');
+const userEmailEl = document.getElementById('userEmail');
+
+document.getElementById('signInBtn').addEventListener('click', async ()=>{
+  authError.textContent=''; authNote.textContent='';
+  const login = authEmail.value.trim();
+  const err = validateLogin(login); if(err){ authError.textContent=err; return; }
+  const { error } = await sb.auth.signInWithPassword({ email: loginToEmail(login), password: authPassword.value });
+  if(error) authError.textContent = /invalid login/i.test(error.message) ? 'Неверный логин или пароль.' : error.message;
+});
+document.getElementById('signUpBtn').addEventListener('click', async ()=>{
+  authError.textContent=''; authNote.textContent='';
+  const login = authEmail.value.trim();
+  const err = validateLogin(login); if(err){ authError.textContent=err; return; }
+  if(authPassword.value.length<6){ authError.textContent='Пароль должен быть не короче 6 символов.'; return; }
+  const { error } = await sb.auth.signUp({ email: loginToEmail(login), password: authPassword.value });
+  if(error) authError.textContent = /already registered/i.test(error.message) ? 'Такой логин уже занят — выберите другой.' : error.message;
+  else authNote.textContent = 'Готово — теперь нажмите «Войти».';
+});
+document.getElementById('signOutBtn').addEventListener('click', ()=> sb.auth.signOut());
+
+sb.auth.onAuthStateChange((event, session)=>{
+  if(session){
+    authScreen.style.display='none';
+    appRoot.style.display='block';
+    userEmailEl.textContent = emailToLogin(session.user.email);
+    loadUploadsList();
+  } else {
+    authScreen.style.display='flex';
+    appRoot.style.display='none';
+  }
+});
+
+/* ---------- uploads list & period selection ---------- */
+async function loadUploadsList(){
+  const { data, error } = await sb.from('sb_uploads').select('id,report_date,created_at').order('report_date',{ascending:false}).order('created_at',{ascending:false});
+  const sel = document.getElementById('periodSelect');
+  if(error){ sel.innerHTML='<option value="">— ошибка загрузки —</option>'; return; }
+  const seen = new Set();
+  uploadsList = [];
+  (data||[]).forEach(u=>{ if(!seen.has(u.report_date)){ seen.add(u.report_date); uploadsList.push(u); } });
+  if(!uploadsList.length){
+    sel.innerHTML = '<option value="">— нет загруженных отчётов —</option>';
+    document.getElementById('dashboardArea').style.display='none';
+    return;
+  }
+  sel.innerHTML = uploadsList.map(u=>'<option value="'+u.report_date+'">'+fmtDate(u.report_date)+'</option>').join('');
+  sel.value = uploadsList[0].report_date;
+  await showPeriod(uploadsList[0].report_date);
+}
+
+document.getElementById('periodSelect').addEventListener('change', e=>{
+  if(e.target.value) showPeriod(e.target.value);
+});
+
+async function showPeriod(reportDate){
+  const idx = uploadsList.findIndex(u=>u.report_date===reportDate);
+  if(idx===-1) return;
+  const current = uploadsList[idx];
+  const previous = uploadsList[idx+1] || null;
+
+  document.getElementById('periodNote').textContent = previous
+    ? 'Сравнение с предыдущей загрузкой: ' + fmtDate(previous.report_date)
+    : 'Это первая загрузка — сравнивать пока не с чем.';
+
+  const { data: curRows } = await sb.from('sb_snapshots').select('*').eq('upload_id', current.id);
+  currentPeriodRows = curRows || [];
+  previousPeriodRows = [];
+  if(previous){
+    const { data: prevRows } = await sb.from('sb_snapshots').select('*').eq('upload_id', previous.id);
+    previousPeriodRows = prevRows || [];
+  }
+
+  const dyn = computeDynamics(currentPeriodRows, previousPeriodRows);
+  dynamicsActive = sortActive(dyn.active);
+  dynamicsResolved = dyn.resolved;
+
+  await loadLastActions();
+  document.getElementById('dashboardArea').style.display='block';
+  renderKPIs();
+  renderDeptTargets();
+  renderStageEfficiency(previousPeriodRows);
+  renderMainTable();
+  renderResolvedTable();
+}
+
+async function loadLastActions(){
+  lastActionByClient = new Map();
+  const { data } = await sb.from('sb_actions').select('client_key,action_type,action_date').order('action_date',{ascending:false});
+  (data||[]).forEach(a=>{ if(!lastActionByClient.has(a.client_key)) lastActionByClient.set(a.client_key, a); });
+}
+
+/* ---------- KPIs ---------- */
+function renderKPIs(){
+  const overdue = dynamicsActive.filter(r=>r.bucket);
+  const tonsOverdue = overdue.reduce((s,r)=>s+(r.weight_kg||0),0)/1000;
+  const tonsTotal = dynamicsActive.reduce((s,r)=>s+(r.weight_kg||0),0)/1000;
+  const debtOverdue = overdue.reduce((s,r)=>s+(r.debt||0),0);
+  const worse = dynamicsActive.filter(r=>r.status==='worse').length;
+  const better = dynamicsActive.filter(r=>r.status==='better').length;
+  const isNew = dynamicsActive.filter(r=>r.status==='new').length;
+  const resolvedCount = dynamicsResolved.length;
+  const pct = tonsTotal>0 ? (tonsOverdue/tonsTotal*100) : 0;
+
+  const tiles = [
+    ['Контрагентов в просрочке', overdue.length, ''],
+    ['Тоннаж в просрочке', fmtTons(tonsOverdue), 'из ' + fmtTons(tonsTotal) + ' у клиентов (' + nf1.format(pct) + '%)'],
+    ['Долг просроченных, ₽', fmtRub(debtOverdue), ''],
+    ['Ухудшилось', worse, 'за период'],
+    ['Улучшилось', better, 'за период'],
+    ['Новые в просрочке', isNew, ''],
+    ['Погашено / выбыло', resolvedCount, ''],
+  ];
+  document.getElementById('kpiRow').innerHTML = tiles.map(t=>
+    '<div class="kpi"><div class="label">'+t[0]+'</div><div class="value">'+t[1]+'</div>'+(t[2]?'<div class="sub">'+t[2]+'</div>':'')+'</div>'
+  ).join('');
+}
+
+/* ---------- department targets (derived, not manually entered) ---------- */
+function renderDeptTargets(){
+  const b07 = dynamicsActive.filter(r=>r.bucket==='0-7');
+  const b0814 = dynamicsActive.filter(r=>r.bucket==='8-14');
+  const b1521 = dynamicsActive.filter(r=>r.bucket==='15-21');
+  const b2228 = dynamicsActive.filter(r=>r.bucket==='22-28');
+  const b29 = dynamicsActive.filter(r=>r.bucket==='29+');
+
+  const sumMoney = rows => rows.reduce((s,r)=>s+moneyAtStake(r),0);
+  const sumTons = rows => rows.reduce((s,r)=>s+(r.weight_kg||0),0)/1000;
+  const needsAction = (rows, doneTypes) => rows.filter(r=>{
+    const a = lastActionByClient.get(r.client_key);
+    return !a || doneTypes.indexOf(a.action_type)===-1;
+  });
+
+  const claimPending = needsAction(b0814, ['Претензия направлена']);
+  const seizureRows = b1521.concat(b2228);
+  const seizurePending = needsAction(seizureRows, ['Изъятие начато','Изъятие завершено']);
+  const courtPending = needsAction(b29, ['Передано в суд/банкротство']);
+
+  const tiles = [
+    ['Продление · 0–7 дней', fmtRub(sumMoney(b07)), b07.length+' контрагентов — собрать до эскалации в претензию'],
+    ['Претензии · 8–14 дней', claimPending.length+' из '+b0814.length, 'ещё не направлена; под риском '+fmtRub(sumMoney(b0814))],
+    ['Изъятие · 15–28 дней', fmtTons(sumTons(seizureRows)), seizurePending.length+' из '+seizureRows.length+' — не начато/не завершено'],
+    ['Взыскание (суд) · 29+', fmtRub(sumMoney(b29)), courtPending.length+' из '+b29.length+' — ещё не передано в суд'],
+  ];
+  document.getElementById('deptRow').innerHTML = tiles.map(t=>
+    '<div class="kpi"><div class="label">'+t[0]+'</div><div class="value">'+t[1]+'</div><div class="sub">'+t[2]+'</div></div>'
+  ).join('');
+}
+
+/* ---------- stage efficiency / conversion to money ---------- */
+function computeStageEfficiency(previousRows){
+  const resolvedKeys = new Set(dynamicsResolved.map(r=>r.client_key));
+  const activeByKey = new Map(dynamicsActive.map(r=>[r.client_key, r]));
+  return BUCKET_LABELS.map(b=>{
+    const was = (previousRows||[]).filter(p=>p.bucket===b);
+    let resolvedCount=0, resolvedDebt=0, betterCount=0, sameCount=0, worseCount=0;
+    was.forEach(p=>{
+      if(resolvedKeys.has(p.client_key)){ resolvedCount++; resolvedDebt += moneyAtStake(p); return; }
+      const cur = activeByKey.get(p.client_key);
+      if(!cur) return;
+      if(cur.status==='better') betterCount++;
+      else if(cur.status==='same') sameCount++;
+      else if(cur.status==='worse') worseCount++;
+    });
+    const totalDebt = was.reduce((s,p)=>s+moneyAtStake(p),0);
+    const convPct = totalDebt>0 ? (resolvedDebt/totalDebt*100) : null;
+    return { bucket:b, count: was.length, totalDebt, resolvedCount, betterCount, sameCount, worseCount, convPct };
+  });
+}
+function renderStageEfficiency(previousRows){
+  const table = document.getElementById('efficiencyTable');
+  if(!previousRows || !previousRows.length){
+    table.innerHTML = '<tbody><tr><td style="color:var(--ink-muted);padding:8px;">Нет данных за предыдущий период для расчёта конверсии.</td></tr></tbody>';
+    return;
+  }
+  const rows = computeStageEfficiency(previousRows);
+  let h = '<thead><tr><th>Стадия (было на прошлой загрузке)</th><th>Контрагентов</th><th>Под риском, ₽</th><th>Погашено/выбыло</th><th>Улучшилось</th><th>Без изменений</th><th>Эскалировано</th><th>Конверсия в деньги</th></tr></thead><tbody>';
+  rows.forEach(r=>{
+    if(r.count===0){ h += '<tr><td>'+BUCKET_TITLES[r.bucket]+'</td><td colspan="7" style="color:var(--ink-muted);">никого не было</td></tr>'; return; }
+    h += '<tr>'
+      + '<td>'+bucketChip(r.bucket)+'</td>'
+      + '<td class="num">'+r.count+'</td>'
+      + '<td class="num">'+fmtRub(r.totalDebt)+'</td>'
+      + '<td class="num">'+r.resolvedCount+' ('+nf1.format(r.count?r.resolvedCount/r.count*100:0)+'%)</td>'
+      + '<td class="num">'+r.betterCount+'</td>'
+      + '<td class="num">'+r.sameCount+'</td>'
+      + '<td class="num">'+r.worseCount+'</td>'
+      + '<td class="num">'+(r.convPct!=null?nf1.format(r.convPct)+'%':'—')+'</td>'
+      + '</tr>';
+  });
+  h += '</tbody>';
+  table.innerHTML = h;
+}
+
+/* ---------- main table ---------- */
+function applyFilters(rows){
+  const q = document.getElementById('searchInput').value.trim().toLowerCase();
+  const onlyWorse = document.getElementById('onlyWorseChk').checked;
+  const bucketF = document.getElementById('bucketFilter').value;
+  return rows.filter(r=>{
+    if(!r.bucket) return false; // active table = только те, кто сейчас в просрочке
+    if(q && r.client_raw.toLowerCase().indexOf(q)===-1) return false;
+    if(onlyWorse && r.status!=='worse') return false;
+    if(bucketF && r.bucket!==bucketF) return false;
+    return true;
+  });
+}
+
+function renderMainTable(){
+  const rows = applyFilters(dynamicsActive);
+  const table = document.getElementById('mainTable');
+  let h = '<thead><tr>'
+    + '<th>Контрагент</th><th>Статус</th><th>Дней просрочки</th><th>Стадия</th>'
+    + '<th>Долг, ₽</th><th>Δ долга</th><th>Тоннаж, т</th><th>Рекомендуемое действие</th><th>Последнее действие</th><th></th>'
+    + '</tr></thead><tbody>';
+  if(!rows.length){
+    h += '<tr><td colspan="10" style="color:var(--ink-muted);">Никого не найдено по текущим фильтрам.</td></tr>';
+  }
+  rows.forEach(r=>{
+    const deltaDebt = (r.debt||0) - (r.prev ? (r.prev.debt||0) : 0);
+    const deltaText = r.prev ? (deltaDebt>=0?'+':'') + nf0.format(Math.round(deltaDebt)) : '—';
+    const lastAction = lastActionByClient.get(r.client_key);
+    const lastActionText = lastAction ? lastAction.action_type + ' (' + fmtDate(lastAction.action_date) + ')' : '—';
+    h += '<tr data-key="'+encodeURIComponent(r.client_key)+'">'
+      + '<td class="client">'+r.client_raw+(r.manager?'<span class="manager">'+r.manager+'</span>':'')+'</td>'
+      + '<td><span class="badge st-'+r.status+'">'+STATUS_LABEL[r.status]+'</span></td>'
+      + '<td class="num">'+(r.prev?fmtDays(r.prev.overdue_days)+'<span class="arrow">→</span>':'')+fmtDays(r.overdue_days)+'</td>'
+      + '<td>'+(r.prev?bucketChip(r.prev.bucket)+'<span class="arrow">→</span>':'')+bucketChip(r.bucket)+'</td>'
+      + '<td class="num">'+fmtRub(r.debt)+'</td>'
+      + '<td class="num">'+deltaText+'</td>'
+      + '<td class="num">'+fmtTons((r.weight_kg||0)/1000)+'</td>'
+      + '<td class="action-col">'+ACTION_BY_BUCKET[r.bucket||'null']+'</td>'
+      + '<td class="action-col">'+lastActionText+'</td>'
+      + '<td><button class="chip-btn" data-toggle="'+encodeURIComponent(r.client_key)+'">Журнал</button></td>'
+      + '</tr>';
+    if(expandedClientKey === r.client_key){
+      h += '<tr class="log-row" data-logfor="'+encodeURIComponent(r.client_key)+'"><td colspan="10"><div class="log-box" id="logbox-placeholder"></div></td></tr>';
+    }
+  });
+  h += '</tbody>';
+  table.innerHTML = h;
+
+  table.querySelectorAll('button[data-toggle]').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      const key = decodeURIComponent(btn.dataset.toggle);
+      expandedClientKey = (expandedClientKey===key) ? null : key;
+      renderMainTable();
+      if(expandedClientKey===key) renderActionLog(key);
+    });
+  });
+}
+
+async function renderActionLog(clientKey){
+  const row = dynamicsActive.find(r=>r.client_key===clientKey);
+  const tr = document.querySelector('tr[data-logfor="'+encodeURIComponent(clientKey)+'"]');
+  if(!tr) return;
+  const box = tr.querySelector('.log-box');
+  box.innerHTML = 'Загрузка…';
+  const { data, error } = await sb.from('sb_actions').select('*').eq('client_key', clientKey).order('action_date',{ascending:false});
+  let html = '<div style="font-weight:600;margin-bottom:6px;">'+ (row?row.client_raw:clientKey) +'</div>';
+  if(error){ html += '<div class="note warn">Ошибка загрузки журнала.</div>'; }
+  else if(!data || !data.length){ html += '<div class="note">Действий пока не зафиксировано.</div>'; }
+  else {
+    html += (data||[]).map(a=>'<div class="log-entry"><span class="date">'+fmtDate(a.action_date)+'</span><span>'+a.action_type+(a.comment?' — '+a.comment:'')+'</span>'
+      + (a.created_by_email?'<span style="margin-left:auto;color:var(--ink-muted);">'+emailToLogin(a.created_by_email)+'</span>':'')
+      + '</div>').join('');
+  }
+  html += '<div class="log-form">'
+    + '<select id="newActionType">'+ACTION_TYPES.map(t=>'<option>'+t+'</option>').join('')+'</select>'
+    + '<input type="date" id="newActionDate" value="'+new Date().toISOString().slice(0,10)+'">'
+    + '<textarea id="newActionComment" placeholder="Комментарий (необязательно)"></textarea>'
+    + '<button class="btn primary small" id="saveActionBtn">Сохранить</button>'
+    + '</div>';
+  box.innerHTML = html;
+
+  document.getElementById('saveActionBtn').addEventListener('click', async ()=>{
+    const { data:{ session } } = await sb.auth.getSession();
+    const actionType = document.getElementById('newActionType').value;
+    const actionDate = document.getElementById('newActionDate').value;
+    const comment = document.getElementById('newActionComment').value.trim();
+    const { error:insErr } = await sb.from('sb_actions').insert({
+      client_key: clientKey, client_raw: row?row.client_raw:clientKey,
+      action_type: actionType, action_date: actionDate, comment: comment||null,
+      created_by: session.user.id, created_by_email: session.user.email
+    });
+    if(insErr){ alert('Ошибка сохранения: '+insErr.message); return; }
+    await loadLastActions();
+    renderMainTable();
+    renderActionLog(clientKey);
+  });
+}
+
+function renderResolvedTable(){
+  const table = document.getElementById('resolvedTable');
+  if(!dynamicsResolved.length){
+    table.innerHTML = '<tbody><tr><td style="color:var(--ink-muted);padding:8px;">За этот период никто не выбыл из просрочки.</td></tr></tbody>';
+    return;
+  }
+  let h = '<thead><tr><th>Контрагент</th><th>Была стадия</th><th>Был долг, ₽</th><th>Был тоннаж, т</th></tr></thead><tbody>';
+  dynamicsResolved.slice().sort((a,b)=>(b.weight_kg||0)-(a.weight_kg||0)).forEach(r=>{
+    h += '<tr><td class="client">'+r.client_raw+(r.manager?'<span class="manager">'+r.manager+'</span>':'')+'</td>'
+      + '<td>'+bucketChip(r.bucket)+'</td>'
+      + '<td class="num">'+fmtRub(r.debt)+'</td>'
+      + '<td class="num">'+fmtTons((r.weight_kg||0)/1000)+'</td></tr>';
+  });
+  h += '</tbody>';
+  table.innerHTML = h;
+}
+
+['searchInput'].forEach(id=> document.getElementById(id).addEventListener('input', renderMainTable));
+['onlyWorseChk','bucketFilter'].forEach(id=> document.getElementById(id).addEventListener('change', renderMainTable));
+
+/* ---------- upload flow ---------- */
+document.getElementById('reportDateInput').value = new Date().toISOString().slice(0,10);
+
+document.getElementById('uploadBtn').addEventListener('click', async ()=>{
+  const statusEl = document.getElementById('uploadStatus');
+  const fileInput = document.getElementById('fileInput');
+  const reportDate = document.getElementById('reportDateInput').value;
+  if(!fileInput.files.length){ statusEl.textContent='Выберите файл.'; return; }
+  if(!reportDate){ statusEl.textContent='Укажите дату отчёта.'; return; }
+  statusEl.textContent = 'Обработка файла…';
+  try{
+    const file = fileInput.files[0];
+    const buf = await file.arrayBuffer();
+    const wb = XLSX.read(buf, {type:'array', cellDates:true});
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    const rows = XLSX.utils.sheet_to_json(ws, {header:1, raw:true, defval:null});
+    const parsed = parseWorkbookRows(rows);
+    if(!parsed.length){ statusEl.textContent='В файле не найдено ни одной строки с контрагентом.'; return; }
+
+    const { data:{ session } } = await sb.auth.getSession();
+    const { data: uploadRow, error: upErr } = await sb.from('sb_uploads').insert({
+      report_date: reportDate, uploaded_by: session.user.id, uploaded_by_email: session.user.email,
+      filename: file.name, row_count: parsed.length
+    }).select().single();
+    if(upErr){ statusEl.textContent = 'Ошибка сохранения загрузки: '+upErr.message; return; }
+
+    const snapshotRows = parsed.map(p=> Object.assign({upload_id: uploadRow.id, report_date: reportDate}, p));
+    const chunkSize = 200;
+    for(let i=0;i<snapshotRows.length;i+=chunkSize){
+      const chunk = snapshotRows.slice(i, i+chunkSize);
+      const { error: insErr } = await sb.from('sb_snapshots').insert(chunk);
+      if(insErr){ statusEl.textContent = 'Ошибка сохранения строк: '+insErr.message; return; }
+    }
+    statusEl.textContent = 'Загружено: '+parsed.length+' контрагентов на '+fmtDate(reportDate)+'.';
+    fileInput.value = '';
+    await loadUploadsList();
+    document.getElementById('periodSelect').value = reportDate;
+  } catch(e){
+    statusEl.textContent = 'Ошибка: '+e.message;
+  }
+});
+
+})();
+</script>
