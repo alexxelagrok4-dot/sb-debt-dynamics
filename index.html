@@ -221,7 +221,7 @@ tr.log-row td{background:var(--surface-2);white-space:normal;}
     </div>
 
     <div class="card">
-      <h2>Контрагенты в просрочке <span class="hint">по умолчанию — сначала ухудшившиеся</span></h2>
+      <h2>Контрагенты в просрочке <span class="hint">стадия считается от накопленного долга (после того, как исчерпан аванс), в днях суточного платежа — а не от календарных дней 1С; по умолчанию — сначала ухудшившиеся</span></h2>
       <div class="filters">
         <input type="text" id="searchInput" placeholder="Поиск по названию…">
         <label><input type="checkbox" id="onlyWorseChk"> только ухудшившиеся</label>
@@ -353,19 +353,39 @@ function toUTCDate(dateStr){ return new Date(dateStr+'T00:00:00Z'); }
 function daysBetween(fromStr, toStr){ return Math.round((toUTCDate(toStr)-toUTCDate(fromStr))/86400000); }
 function addDaysStr(dateStr, n){ const d=toUTCDate(dateStr); d.setUTCDate(d.getUTCDate()+n); return d.toISOString().slice(0,10); }
 
-function computeClientLedger(bootstrapRow, actionsForClient, latestDailyRate){
-  if(!bootstrapRow) return null;
-  let advance = bootstrapRow.advance || 0;
-  let debt = bootstrapRow.debt || 0;
-  let lastPeriodEnd = addDaysStr(bootstrapRow.report_date, -(bootstrapRow.overdue_days||0));
-  let cumulativeRecovered = 0;
-  let cumulativeTonsReturned = 0;
-  const rate = (latestDailyRate!==null && latestDailyRate!==undefined) ? latestDailyRate : (bootstrapRow.daily_payment||0);
-  const sorted = (actionsForClient||[]).slice().sort((a,b)=>{
-    if(a.action_date!==b.action_date) return a.action_date<b.action_date?-1:1;
-    return String(a.created_at||'').localeCompare(String(b.created_at||''));
+// 1С сама каждую неделю пересчитывает "Задолженность"/"Авансы" по факту — это не
+// разовая оценка, а актуальная цифра на дату КАЖДОГО отчёта. Поэтому базой для
+// накопителя служит САМЫЙ СВЕЖИЙ известный по клиенту снэпшот (а не первый, который
+// когда-то видели) — иначе реальная оплата, которую клиент провёл между нашими
+// загрузками (и которую 1С уже честно показала в следующем отчёте как "долга нет,
+// аванс пополнен"), осталась бы незамеченной, и мы бы бесконечно требовали давно
+// погашенный долг. Поверх этой свежей базы "доигрываются" только те действия
+// (счета/оплаты/взыскания), что датированы ПОСЛЕ даты этого свежего отчёта — то,
+// что 1С ещё физически не могла учесть в след. выгрузке.
+function computeClientLedger(baselineRow, actionsForClient, dailyRateOverride, cutoffDate){
+  if(!baselineRow) return null;
+  let advance = baselineRow.advance || 0;
+  let debt = baselineRow.debt || 0;
+  let lastPeriodEnd = addDaysStr(baselineRow.report_date, -(baselineRow.overdue_days||0));
+  const rate = (dailyRateOverride!==null && dailyRateOverride!==undefined) ? dailyRateOverride : (baselineRow.daily_payment||0);
+
+  const allActions = actionsForClient||[];
+  // Взыскано/возвращено тоннажа — это накопительная статистика за всё время
+  // (сколько всего когда-либо получили/изъяли у этого клиента), она не сбрасывается
+  // при каждом новом отчёте 1С, в отличие от текущего остатка долга/аванса.
+  let cumulativeRecovered = 0, cumulativeTonsReturned = 0;
+  allActions.forEach(a=>{
+    if(a.action_type===RECOVERY_ACTION && a.recovered_amount!==null && a.recovered_amount!==undefined) cumulativeRecovered += a.recovered_amount;
+    if(a.action_type===TONS_RETURN_ACTION && a.tons_returned!==null && a.tons_returned!==undefined) cumulativeTonsReturned += a.tons_returned;
   });
-  sorted.forEach(a=>{
+
+  const relevant = allActions
+    .filter(a=> a.action_date>baselineRow.report_date && (!cutoffDate || a.action_date<=cutoffDate))
+    .slice().sort((a,b)=>{
+      if(a.action_date!==b.action_date) return a.action_date<b.action_date?-1:1;
+      return String(a.created_at||'').localeCompare(String(b.created_at||''));
+    });
+  relevant.forEach(a=>{
     if(a.action_type===INVOICE_ACTION && a.invoice_period_end){
       const days = daysBetween(lastPeriodEnd, a.invoice_period_end);
       if(days>0){
@@ -378,9 +398,6 @@ function computeClientLedger(bootstrapRow, actionsForClient, latestDailyRate){
       debt = Math.max(0, debt - a.payment_amount);
     } else if(a.action_type===RECOVERY_ACTION && a.recovered_amount!==null && a.recovered_amount!==undefined){
       debt = Math.max(0, debt - a.recovered_amount);
-      cumulativeRecovered += a.recovered_amount;
-    } else if(a.action_type===TONS_RETURN_ACTION && a.tons_returned!==null && a.tons_returned!==undefined){
-      cumulativeTonsReturned += a.tons_returned;
     }
   });
   return { debt, advance, dailyRate: rate, lastPeriodEnd, cumulativeRecovered, cumulativeTonsReturned };
@@ -388,28 +405,70 @@ function computeClientLedger(bootstrapRow, actionsForClient, latestDailyRate){
 
 let clientLedgers = new Map();
 let allActionsByClient = new Map();
+let clientLatestSnapshotByKey = new Map();
 async function rebuildLedgers(){
   const { data: allSnaps } = await sb.from('sb_snapshots').select('client_key,client_raw,report_date,debt,advance,daily_payment,overdue_days').order('report_date',{ascending:true});
   const { data: allActions } = await sb.from('sb_actions').select('*').order('action_date',{ascending:true});
-  const bootstrapByClient = new Map();
-  const latestDailyByClient = new Map();
-  (allSnaps||[]).forEach(r=>{
-    if(!bootstrapByClient.has(r.client_key)) bootstrapByClient.set(r.client_key, r);
-    latestDailyByClient.set(r.client_key, r.daily_payment);
-  });
+  clientLatestSnapshotByKey = new Map();
+  (allSnaps||[]).forEach(r=>{ clientLatestSnapshotByKey.set(r.client_key, r); }); // ascending order => last write = latest
   allActionsByClient = new Map();
   (allActions||[]).forEach(a=>{
     if(!allActionsByClient.has(a.client_key)) allActionsByClient.set(a.client_key, []);
     allActionsByClient.get(a.client_key).push(a);
   });
   clientLedgers = new Map();
-  bootstrapByClient.forEach((bootstrapRow, key)=>{
-    clientLedgers.set(key, computeClientLedger(bootstrapRow, allActionsByClient.get(key), latestDailyByClient.get(key)));
+  clientLatestSnapshotByKey.forEach((latestRow, key)=>{
+    clientLedgers.set(key, computeClientLedger(latestRow, allActionsByClient.get(key), latestRow.daily_payment));
   });
 }
 function debtForRow(r){
   const l = clientLedgers.get(r.client_key);
   return l ? l.debt : moneyAtStake(r);
+}
+
+/* ---------- debt-based stage classification (not calendar-based) ----------
+   1С помечает стадию 0-7/8-14/15-21/22-28/29+ по КАЛЕНДАРНЫМ дням с конца оплаченного
+   периода — это не учитывает остаток аванса, поэтому клиент с большим авансом может
+   калейндарно значиться в "изъятии", хотя реальных денег за ним ещё не числится.
+   Реальная стадия для целей работы отдела — это накопленный долг (после того, как
+   аванс исчерпан), выраженный в днях суточного платежа. Именно это определяет зону
+   ответственности и подсветку "стадия" в таблицах — а не сырую колонку 1С. */
+function debtDaysToZone(days){
+  if(days===null || days===undefined || days<=0) return null;
+  if(days<=7) return '0-7';
+  if(days<=14) return '8-14';
+  if(days<=21) return '15-21';
+  if(days<=28) return '22-28';
+  return '29+';
+}
+function daysFromDebtAndRate(debt, rate){
+  if(!rate || rate<=0) return debt>0 ? Infinity : 0;
+  return debt/rate;
+}
+// Стадия строки, которая является САМЫМ СВЕЖИМ известным снэпшотом клиента —
+// используем накопитель (clientLedgers), который "доигрывает" вперёд действия,
+// датированные позже этого отчёта (то, что 1С ещё не успела учесть). Для более
+// СТАРОГО снэпшота того же клиента (например, при просмотре прошлой недели или при
+// сравнении динамики) накопитель не нужен — тот отчёт уже был полностью замещён
+// более свежим реальным отчётом 1С, поэтому берём его собственные цифры как есть.
+function isLatestSnapshotForClient(r){
+  const latest = clientLatestSnapshotByKey.get(r.client_key);
+  return !!latest && latest.report_date===r.report_date;
+}
+function effectiveZone(r){
+  if(isLatestSnapshotForClient(r)){
+    const l = clientLedgers.get(r.client_key);
+    const debt = l ? l.debt : (r.debt||0);
+    const rate = r.daily_payment || (l && l.dailyRate) || 0;
+    return debtDaysToZone(daysFromDebtAndRate(debt, rate));
+  }
+  return debtDaysToZone(daysFromDebtAndRate(r.debt||0, r.daily_payment||0));
+}
+// Историческая стадия "на дату" — для строк ПРЕДЫДУЩЕГО периода при сравнении
+// динамики: та строка сама по себе уже была самой свежей на СВОЮ дату, поэтому её
+// собственные "Задолженность"/"Суточный платёж" и есть корректное "было".
+function effectiveZoneAsOf(r){
+  return debtDaysToZone(daysFromDebtAndRate(r.debt||0, r.daily_payment||0));
 }
 
 /* ---------- expected action per zone of responsibility ----------
@@ -430,7 +489,7 @@ const EXPECTED_ACTIONS_BY_ZONE = {
 const ZONE_TITLES = {'prolong':'Продление (до просрочки)','0-7':'Продление · 0–7 дней','8-14':'Претензии · 8–14 дней','15-21':'Изъятие · 15–21 день','22-28':'Изъятие · 22–28 дней','29+':'Взыскание · 29+'};
 function zoneForRow(r){
   if(isProlongWindow(r.overdue_days)) return 'prolong';
-  return r.bucket || null;
+  return effectiveZone(r);
 }
 function hasExpectedAction(clientKey, zone){
   const expected = zone ? EXPECTED_ACTIONS_BY_ZONE[zone] : null;
@@ -474,7 +533,7 @@ function computeDynamics(currentRows, previousRows){
     let status;
     if(!prev) status = 'new';
     else {
-      const sp = severityOf(prev.bucket), sc = severityOf(cur.bucket);
+      const sp = severityOf(effectiveZoneAsOf(prev)), sc = severityOf(effectiveZone(cur));
       status = sc>sp ? 'worse' : (sc<sp ? 'better' : 'same');
     }
     return Object.assign({}, cur, {prev, status});
@@ -498,9 +557,10 @@ function computeAnomalies(currentRows, previousRows){
     currentRows.forEach(cur=>{
       const prev = prevMap.get(cur.client_key);
       if(!prev) return;
-      const sevPrev = severityOf(prev.bucket), sevCur = severityOf(cur.bucket);
+      const prevZone = effectiveZoneAsOf(prev), curZone = effectiveZone(cur);
+      const sevPrev = severityOf(prevZone), sevCur = severityOf(curZone);
       if(sevCur - sevPrev >= 2){
-        anomalies.push({severity:'critical', text:'«'+cur.client_raw+'» — скачок сразу через несколько стадий за одну загрузку: '+(prev.bucket?BUCKET_TITLES[prev.bucket]:'не было просрочки')+' → '+BUCKET_TITLES[cur.bucket]+'. Проверьте, не пропущена ли промежуточная загрузка.'});
+        anomalies.push({severity:'critical', text:'«'+cur.client_raw+'» — скачок сразу через несколько стадий за одну загрузку: '+(prevZone?BUCKET_TITLES[prevZone]:'не было просрочки')+' → '+BUCKET_TITLES[curZone]+'. Проверьте, не пропущена ли промежуточная загрузка.'});
       }
       if(prev.daily_payment && cur.daily_payment){
         const change = Math.abs(cur.daily_payment-prev.daily_payment)/Math.abs(prev.daily_payment);
@@ -539,7 +599,7 @@ function sortActive(rows){
   return rows.slice().sort((a,b)=>{
     const wa=STATUS_WEIGHT[a.status], wb=STATUS_WEIGHT[b.status];
     if(wa!==wb) return wb-wa;
-    const sa=severityOf(a.bucket), sb=severityOf(b.bucket);
+    const sa=severityOf(effectiveZone(a)), sb=severityOf(effectiveZone(b));
     if(sa!==sb) return sb-sa;
     return (b.weight_kg||0)-(a.weight_kg||0);
   });
@@ -651,12 +711,16 @@ async function showPeriod(reportDate, compareDate){
     previousPeriodRows = prevRows || [];
   }
 
+  await loadLastActions();
+  await rebuildLedgers();
+  // Стадия (0-7/8-14/.../29+) теперь считается от накопленного долга, а не от
+  // календарной колонки 1С — computeDynamics/computeAnomalies/sortActive читают
+  // clientLedgers через effectiveZone()/effectiveZoneAsOf(), поэтому ledger должен
+  // быть готов до них.
   const dyn = computeDynamics(currentPeriodRows, previousPeriodRows);
   dynamicsActive = sortActive(dyn.active);
   dynamicsResolved = dyn.resolved;
 
-  await loadLastActions();
-  await rebuildLedgers();
   document.getElementById('dashboardArea').style.display='block';
   renderKPIs();
   renderAnomalies(currentPeriodRows, previousPeriodRows);
@@ -746,11 +810,11 @@ function renderProlongTable(){
 
 /* ---------- department targets (derived, not manually entered) ---------- */
 function renderDeptTargets(){
-  const b07 = dynamicsActive.filter(r=>r.bucket==='0-7' && !isConfirmedReturn(r.client_key));
-  const b0814 = dynamicsActive.filter(r=>r.bucket==='8-14' && !isConfirmedReturn(r.client_key));
-  const b1521 = dynamicsActive.filter(r=>r.bucket==='15-21' && !isConfirmedReturn(r.client_key));
-  const b2228 = dynamicsActive.filter(r=>r.bucket==='22-28' && !isConfirmedReturn(r.client_key));
-  const b29 = dynamicsActive.filter(r=>r.bucket==='29+' && !isConfirmedReturn(r.client_key));
+  const b07 = dynamicsActive.filter(r=>effectiveZone(r)==='0-7' && !isConfirmedReturn(r.client_key));
+  const b0814 = dynamicsActive.filter(r=>effectiveZone(r)==='8-14' && !isConfirmedReturn(r.client_key));
+  const b1521 = dynamicsActive.filter(r=>effectiveZone(r)==='15-21' && !isConfirmedReturn(r.client_key));
+  const b2228 = dynamicsActive.filter(r=>effectiveZone(r)==='22-28' && !isConfirmedReturn(r.client_key));
+  const b29 = dynamicsActive.filter(r=>effectiveZone(r)==='29+' && !isConfirmedReturn(r.client_key));
 
   const sumMoney = rows => rows.reduce((s,r)=>s+debtForRow(r),0);
   const sumTons = rows => rows.reduce((s,r)=>s+(r.weight_kg||0),0)/1000;
@@ -784,7 +848,7 @@ function computeStageEfficiency(previousRows){
   const resolvedKeys = new Set(dynamicsResolved.map(r=>r.client_key));
   const activeByKey = new Map(dynamicsActive.map(r=>[r.client_key, r]));
   return BUCKET_LABELS.map(b=>{
-    const was = (previousRows||[]).filter(p=>p.bucket===b);
+    const was = (previousRows||[]).filter(p=>effectiveZoneAsOf(p)===b);
     let resolvedCount=0, resolvedDebt=0, betterCount=0, sameCount=0, worseCount=0;
     was.forEach(p=>{
       if(resolvedKeys.has(p.client_key)){ resolvedCount++; resolvedDebt += debtForRow(p); return; }
@@ -831,11 +895,16 @@ function applyFilters(rows){
   const onlyMissing = document.getElementById('onlyMissingActionChk').checked;
   const bucketF = document.getElementById('bucketFilter').value;
   return rows.filter(r=>{
-    if(!r.bucket) return false; // active table = только те, кто сейчас в просрочке
+    // "В просрочке" по 1С (календарно) — это состав таблицы, как и раньше; а вот
+    // РЕАЛЬНАЯ стадия/зона внутри неё уже денежная (effectiveZone), поэтому клиент,
+    // которого 1С календарно отметила, но у которого ещё есть аванс, всё равно виден
+    // (можно открыть журнал и выставить следующий счёт), просто со стадией
+    // "не просрочен" — а не потерян из вида и не посчитан как под изъятием.
+    if(!r.bucket) return false;
     if(q && r.client_raw.toLowerCase().indexOf(q)===-1) return false;
     if(onlyWorse && r.status!=='worse') return false;
     if(onlyMissing && !isMissingAction(r)) return false;
-    if(bucketF && r.bucket!==bucketF) return false;
+    if(bucketF && effectiveZone(r)!==bucketF) return false;
     return true;
   });
 }
@@ -844,30 +913,25 @@ function renderMainTable(){
   const rows = applyFilters(dynamicsActive);
   const table = document.getElementById('mainTable');
   let h = '<thead><tr>'
-    + '<th>Контрагент</th><th>Статус</th><th>Дней просрочки</th><th>Стадия</th>'
-    + '<th>Суточный платёж</th><th>Долг (1С), ₽</th><th>Δ долга (1С)</th><th>Долг (накоплено), ₽</th><th>Тоннаж, т</th><th>Рекомендуемое действие</th><th>Последнее действие</th><th></th>'
+    + '<th>Контрагент</th><th>Стадия</th><th>Дней просрочки</th>'
+    + '<th>Долг, ₽</th><th>Тоннаж, т</th><th>Действие</th><th>Последнее действие</th><th></th>'
     + '</tr></thead><tbody>';
   if(!rows.length){
-    h += '<tr><td colspan="12" style="color:var(--ink-muted);">Никого не найдено по текущим фильтрам.</td></tr>';
+    h += '<tr><td colspan="8" style="color:var(--ink-muted);">Никого не найдено по текущим фильтрам.</td></tr>';
   }
   rows.forEach(r=>{
-    const deltaDebt = (r.debt||0) - (r.prev ? (r.prev.debt||0) : 0);
-    const deltaText = r.prev ? (deltaDebt>=0?'+':'') + nf0.format(Math.round(deltaDebt)) : '—';
     const lastAction = lastActionByClient.get(r.client_key);
     const lastActionText = lastAction ? lastAction.action_type + ' (' + fmtDate(lastAction.action_date) + ')' : '—';
     const confirmed = isConfirmedReturn(r.client_key);
     const missing = isMissingAction(r);
+    const zone = effectiveZone(r);
     const recommendedAction = confirmed
-      ? '<span class="badge st-resolved">Возврат согласован</span> — не эскалировать, ожидается возврат оборудования'
-      : (missing ? '<span class="badge st-new">Действие не зафиксировано</span> — ' : '') + ACTION_BY_BUCKET[r.bucket||'null'];
+      ? '<span class="badge st-resolved">Возврат согласован</span>'
+      : (missing ? '<span class="badge st-new">Действие не зафиксировано</span> — ' : '') + ACTION_BY_BUCKET[zone||'null'];
     h += '<tr data-key="'+encodeURIComponent(r.client_key)+'"'+(missing?' class="row-flag"':'')+'>'
       + '<td class="client">'+r.client_raw+(r.manager?'<span class="manager">'+r.manager+'</span>':'')+'</td>'
-      + '<td><span class="badge st-'+r.status+'">'+STATUS_LABEL[r.status]+'</span></td>'
+      + '<td><span class="badge st-'+r.status+'">'+STATUS_LABEL[r.status]+'</span> '+(r.prev?bucketChip(effectiveZoneAsOf(r.prev))+'<span class="arrow">→</span>':'')+bucketChip(zone)+'</td>'
       + '<td class="num">'+(r.prev?fmtDays(r.prev.overdue_days)+'<span class="arrow">→</span>':'')+fmtDays(r.overdue_days)+'</td>'
-      + '<td>'+(r.prev?bucketChip(r.prev.bucket)+'<span class="arrow">→</span>':'')+bucketChip(r.bucket)+'</td>'
-      + '<td class="num">'+fmtRub(r.daily_payment)+'</td>'
-      + '<td class="num">'+fmtRub(r.debt)+'</td>'
-      + '<td class="num">'+deltaText+'</td>'
       + '<td class="num">'+fmtRub(debtForRow(r))+'</td>'
       + '<td class="num">'+fmtTons((r.weight_kg||0)/1000)+'</td>'
       + '<td class="action-col">'+recommendedAction+'</td>'
@@ -875,7 +939,7 @@ function renderMainTable(){
       + '<td><button class="chip-btn" data-toggle="'+encodeURIComponent(r.client_key)+'">Журнал</button></td>'
       + '</tr>';
     if(expandedClientKey === r.client_key){
-      h += '<tr class="log-row" data-logfor="'+encodeURIComponent(r.client_key)+'"><td colspan="12"><div class="log-box" id="logbox-placeholder"></div></td></tr>';
+      h += '<tr class="log-row" data-logfor="'+encodeURIComponent(r.client_key)+'"><td colspan="8"><div class="log-box" id="logbox-placeholder"></div></td></tr>';
     }
   });
   h += '</tbody>';
@@ -909,11 +973,17 @@ async function renderActionLog(clientKey){
   const { data, error } = await sb.from('sb_actions').select('*').eq('client_key', clientKey).order('action_date',{ascending:false});
   const ledger = clientLedgers.get(clientKey);
   let html = '<div style="font-weight:600;margin-bottom:6px;">'+ (clientRow?clientRow.client_raw:clientKey) +'</div>';
+  let deltaText = '—';
+  if(clientRow && clientRow.prev){
+    const delta = (clientRow.debt||0)-(clientRow.prev.debt||0);
+    deltaText = (delta>=0?'+':'')+nf0.format(Math.round(delta))+' ₽';
+  }
   html += '<div class="ledger-summary">'
     + '<div><b>Долг (накоплено):</b> '+fmtRub(ledger?ledger.debt:null)+'</div>'
     + '<div><b>Остаток аванса:</b> '+fmtRub(ledger?ledger.advance:null)+'</div>'
     + '<div><b>Суточный платёж:</b> '+fmtRub(ledger?ledger.dailyRate:null)+'/сут</div>'
     + '<div><b>Оплачен период по:</b> '+fmtDate(ledger?ledger.lastPeriodEnd:null)+'</div>'
+    + '<div><b>Долг по 1С на отчёт:</b> '+fmtRub(clientRow?clientRow.debt:null)+' (Δ за неделю '+deltaText+')</div>'
     + '<div><b>Взыскано всего:</b> '+fmtRub(ledger?ledger.cumulativeRecovered:0)+'</div>'
     + '<div><b>Возвращено тоннажа:</b> '+fmtTons(ledger?ledger.cumulativeTonsReturned:0)+'</div>'
     + '</div>';
@@ -1016,7 +1086,7 @@ function renderResolvedTable(){
   let h = '<thead><tr><th>Контрагент</th><th>Была стадия</th><th>Был долг, ₽</th><th>Был тоннаж, т</th></tr></thead><tbody>';
   dynamicsResolved.slice().sort((a,b)=>(b.weight_kg||0)-(a.weight_kg||0)).forEach(r=>{
     h += '<tr><td class="client">'+r.client_raw+(r.manager?'<span class="manager">'+r.manager+'</span>':'')+'</td>'
-      + '<td>'+bucketChip(r.bucket)+'</td>'
+      + '<td>'+bucketChip(effectiveZoneAsOf(r))+'</td>'
       + '<td class="num">'+fmtRub(r.debt)+'</td>'
       + '<td class="num">'+fmtTons((r.weight_kg||0)/1000)+'</td></tr>';
   });
