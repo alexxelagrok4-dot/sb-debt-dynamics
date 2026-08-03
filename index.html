@@ -187,6 +187,11 @@ tr.log-row td{background:var(--surface-2);white-space:normal;}
   <div id="dashboardArea" style="display:none;">
     <div class="kpi-row" id="kpiRow"></div>
 
+    <div class="card" id="anomaliesCard" style="display:none;border-color:color-mix(in srgb, var(--critical) 35%, var(--border));">
+      <h2>Автоматические замечания по загрузке <span class="hint">несостыковки между этой и прошлой загрузкой — не ошибки сами по себе, но стоит проверить</span></h2>
+      <div id="anomaliesList"></div>
+    </div>
+
     <div class="card">
       <h2>Продление — заканчивается оплаченный срок аренды <span class="hint">«Дней просрочки»=0 в отчёте — день окончания уже оплаченного срока; оплата за следующий период вносится за 5 дней до этой даты — то есть уже сейчас. Действие нужно ДО того, как клиент технически уйдёт в просрочку (с 0-го дня по отчёту 1С).</span></h2>
       <div class="table-wrap"><table class="dyn" id="prolongTable"></table></div>
@@ -356,6 +361,55 @@ function computeDynamics(currentRows, previousRows){
   return {active, resolved};
 }
 
+// Автоматические замечания по несостыковкам между загрузками — считаются на лету
+// из уже загруженных данных, ничего дополнительно в базу не пишем.
+function computeAnomalies(currentRows, previousRows){
+  const anomalies = [];
+  const seenInThisUpload = new Map();
+  currentRows.forEach(r=>{
+    if(seenInThisUpload.has(r.client_key)){
+      anomalies.push({severity:'warn', text:'Похожие названия в одной загрузке: «'+seenInThisUpload.get(r.client_key)+'» и «'+r.client_raw+'» — сверьте, это разные контрагенты или задвоение строки.'});
+    } else seenInThisUpload.set(r.client_key, r.client_raw);
+  });
+  if(previousRows && previousRows.length){
+    const prevMap = new Map(previousRows.map(r=>[r.client_key, r]));
+    currentRows.forEach(cur=>{
+      const prev = prevMap.get(cur.client_key);
+      if(!prev) return;
+      const sevPrev = severityOf(prev.bucket), sevCur = severityOf(cur.bucket);
+      if(sevCur - sevPrev >= 2){
+        anomalies.push({severity:'critical', text:'«'+cur.client_raw+'» — скачок сразу через несколько стадий за одну загрузку: '+(prev.bucket?BUCKET_TITLES[prev.bucket]:'не было просрочки')+' → '+BUCKET_TITLES[cur.bucket]+'. Проверьте, не пропущена ли промежуточная загрузка.'});
+      }
+      if(prev.daily_payment && cur.daily_payment){
+        const change = Math.abs(cur.daily_payment-prev.daily_payment)/Math.abs(prev.daily_payment);
+        if(change>0.2){
+          anomalies.push({severity:'warn', text:'«'+cur.client_raw+'» — суточный платёж изменился более чем на 20% за неделю: '+fmtRub(prev.daily_payment)+' → '+fmtRub(cur.daily_payment)+'.'});
+        }
+      }
+      if(prev.weight_kg && cur.weight_kg){
+        const change = Math.abs(cur.weight_kg-prev.weight_kg)/Math.abs(prev.weight_kg);
+        if(change>0.5){
+          anomalies.push({severity:'warn', text:'«'+cur.client_raw+'» — тоннаж у клиента изменился более чем на 50% за неделю: '+fmtTons(prev.weight_kg/1000)+' → '+fmtTons(cur.weight_kg/1000)+'. Проверьте, было ли частичное изъятие/возврат.'});
+        }
+      }
+    });
+  }
+  return anomalies;
+}
+function renderAnomalies(currentRows, previousRows){
+  const list = computeAnomalies(currentRows, previousRows);
+  const card = document.getElementById('anomaliesCard');
+  const box = document.getElementById('anomaliesList');
+  if(!list.length){ card.style.display='none'; return; }
+  card.style.display='block';
+  box.innerHTML = list.map(a=>
+    '<div style="display:flex;gap:8px;align-items:baseline;margin-bottom:8px;font-size:12.5px;">'
+    + '<span class="badge st-'+(a.severity==='critical'?'worse':'new')+'">'+(a.severity==='critical'?'Проверить':'Уточнить')+'</span>'
+    + '<span>'+a.text+'</span>'
+    + '</div>'
+  ).join('');
+}
+
 const STATUS_LABEL = {worse:'Ухудшение', better:'Улучшение', same:'Без изменений', new:'Новый'};
 const STATUS_WEIGHT = {worse:3, new:2, same:1, better:0};
 
@@ -463,6 +517,7 @@ async function showPeriod(reportDate){
   await loadLastActions();
   document.getElementById('dashboardArea').style.display='block';
   renderKPIs();
+  renderAnomalies(currentPeriodRows, previousPeriodRows);
   renderProlongTable();
   renderDeptTargets();
   renderStageEfficiency(previousPeriodRows);
