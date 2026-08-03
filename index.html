@@ -180,6 +180,10 @@ tr.log-row td{background:var(--surface-2);white-space:normal;}
     <div class="field-row">
       <label for="periodSelect">Показать динамику на дату:</label>
       <select id="periodSelect"><option value="">— нет загруженных отчётов —</option></select>
+    </div>
+    <div class="field-row">
+      <label for="compareSelect">Сравнить с периодом:</label>
+      <select id="compareSelect"><option value="">—</option></select>
       <span class="note" id="periodNote" style="margin:0;"></span>
     </div>
   </div>
@@ -492,15 +496,34 @@ document.getElementById('periodSelect').addEventListener('change', e=>{
   if(e.target.value) showPeriod(e.target.value);
 });
 
-async function showPeriod(reportDate){
+document.getElementById('compareSelect').addEventListener('change', e=>{
+  const reportDate = document.getElementById('periodSelect').value;
+  if(reportDate) showPeriod(reportDate, e.target.value);
+});
+
+async function showPeriod(reportDate, compareDate){
   const idx = uploadsList.findIndex(u=>u.report_date===reportDate);
   if(idx===-1) return;
   const current = uploadsList[idx];
-  const previous = uploadsList[idx+1] || null;
+
+  const compareSel = document.getElementById('compareSelect');
+  const otherUploads = uploadsList.filter(u=>u.report_date!==reportDate);
+  let previous = null;
+  if(!otherUploads.length){
+    compareSel.innerHTML = '<option value="">— нет других загрузок —</option>';
+    compareSel.disabled = true;
+  } else {
+    compareSel.disabled = false;
+    compareSel.innerHTML = otherUploads.map(u=>'<option value="'+u.report_date+'">'+fmtDate(u.report_date)+'</option>').join('');
+    const fallback = uploadsList[idx+1] ? uploadsList[idx+1].report_date : otherUploads[0].report_date;
+    const chosen = (compareDate && otherUploads.some(u=>u.report_date===compareDate)) ? compareDate : fallback;
+    compareSel.value = chosen;
+    previous = uploadsList.find(u=>u.report_date===chosen) || null;
+  }
 
   document.getElementById('periodNote').textContent = previous
-    ? 'Сравнение с предыдущей загрузкой: ' + fmtDate(previous.report_date)
-    : 'Это первая загрузка — сравнивать пока не с чем.';
+    ? 'Сравнение с загрузкой: ' + fmtDate(previous.report_date)
+    : 'Нет других загрузок — сравнивать пока не с чем.';
 
   const { data: curRows } = await sb.from('sb_snapshots').select('*').eq('upload_id', current.id);
   currentPeriodRows = curRows || [];
