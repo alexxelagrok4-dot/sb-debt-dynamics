@@ -192,6 +192,13 @@ tr.log-row td{background:var(--surface-2);white-space:normal;}
       <select id="compareSelect"><option value="">—</option></select>
       <span class="note" id="periodNote" style="margin:0;"></span>
     </div>
+    <div class="field-row">
+      <label for="stageLogicSelect">Логика стадий (0-7/8-14/…/29+):</label>
+      <select id="stageLogicSelect">
+        <option value="debt">По деньгам — долг после аванса, в днях суточного платежа</option>
+        <option value="calendar">Календарная — как в 1С/«Динамика СБ» (дни с конца оплаченного периода)</option>
+      </select>
+    </div>
   </div>
 
   <div id="dashboardArea" style="display:none;">
@@ -455,7 +462,16 @@ function isLatestSnapshotForClient(r){
   const latest = clientLatestSnapshotByKey.get(r.client_key);
   return !!latest && latest.report_date===r.report_date;
 }
+// Два способа посчитать стадию 0-7/8-14/.../29+ дают РАЗНЫЕ и оба по-своему верные
+// картины: календарная (как в самой 1С и в файле «Динамика СБ» — дни с конца
+// оплаченного периода, не зависит от остатка аванса) и денежная (накопленный долг
+// после исчерпания аванса, в днях суточного платежа — не эскалирует тех, у кого
+// ещё есть прикрытие). Переключатель в интерфейсе (#stageLogicSelect) выбирает,
+// какая из них сейчас используется везде — в плановых показателях, подсветке,
+// фильтрах и таблицах.
+let stageLogicMode = 'debt'; // 'debt' | 'calendar'
 function effectiveZone(r){
+  if(stageLogicMode==='calendar') return r.bucket || null;
   if(isLatestSnapshotForClient(r)){
     const l = clientLedgers.get(r.client_key);
     const debt = l ? l.debt : (r.debt||0);
@@ -466,8 +482,10 @@ function effectiveZone(r){
 }
 // Историческая стадия "на дату" — для строк ПРЕДЫДУЩЕГО периода при сравнении
 // динамики: та строка сама по себе уже была самой свежей на СВОЮ дату, поэтому её
-// собственные "Задолженность"/"Суточный платёж" и есть корректное "было".
+// собственные "Задолженность"/"Суточный платёж" и есть корректное "было" (в денежном
+// режиме); в календарном режиме — её собственный бакет 1С на ту дату.
 function effectiveZoneAsOf(r){
+  if(stageLogicMode==='calendar') return r.bucket || null;
   return debtDaysToZone(daysFromDebtAndRate(r.debt||0, r.daily_payment||0));
 }
 
@@ -679,6 +697,13 @@ document.getElementById('compareSelect').addEventListener('change', e=>{
   if(reportDate) showPeriod(reportDate, e.target.value);
 });
 
+const stageLogicSelect = document.getElementById('stageLogicSelect');
+stageLogicSelect.value = stageLogicMode;
+stageLogicSelect.addEventListener('change', async e=>{
+  stageLogicMode = e.target.value;
+  if(currentPeriodRows.length) await recomputeAndRenderPeriod();
+});
+
 async function showPeriod(reportDate, compareDate){
   const idx = uploadsList.findIndex(u=>u.report_date===reportDate);
   if(idx===-1) return;
@@ -713,10 +738,18 @@ async function showPeriod(reportDate, compareDate){
 
   await loadLastActions();
   await rebuildLedgers();
-  // Стадия (0-7/8-14/.../29+) теперь считается от накопленного долга, а не от
-  // календарной колонки 1С — computeDynamics/computeAnomalies/sortActive читают
-  // clientLedgers через effectiveZone()/effectiveZoneAsOf(), поэтому ledger должен
-  // быть готов до них.
+  await recomputeAndRenderPeriod();
+}
+
+// Пересчёт динамики/статусов и перерисовка всего — вынесено отдельно от showPeriod,
+// потому что переключатель "Логика стадий" (#stageLogicSelect) должен пересчитать
+// то же самое без повторной загрузки снэпшотов/действий из базы: effectiveZone()/
+// effectiveZoneAsOf() читают глобальный stageLogicMode, поэтому computeDynamics и
+// все render* нужно просто прогнать заново.
+async function recomputeAndRenderPeriod(){
+  // Стадия (0-7/8-14/.../29+) считается либо от накопленного долга, либо календарно
+  // (см. stageLogicMode) — computeDynamics/computeAnomalies/sortActive читают её
+  // через effectiveZone()/effectiveZoneAsOf(), поэтому ledger должен быть готов до них.
   const dyn = computeDynamics(currentPeriodRows, previousPeriodRows);
   dynamicsActive = sortActive(dyn.active);
   dynamicsResolved = dyn.resolved;
