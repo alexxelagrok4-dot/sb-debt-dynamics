@@ -99,6 +99,7 @@ input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px soli
 .badge.st-same{background:var(--surface-3);color:var(--ink-2);}
 .badge.st-new{background:color-mix(in srgb, var(--warning) 20%, transparent);color:var(--warning);}
 .badge.st-resolved{background:color-mix(in srgb, var(--good) 16%, transparent);color:var(--good);}
+tr.row-flag{background:color-mix(in srgb, var(--warning) 8%, transparent);box-shadow:inset 3px 0 0 var(--warning);}
 .bucket-chip{display:inline-block;font-family:var(--font-mono);font-size:11px;font-weight:700;padding:2px 7px;border-radius:6px;background:var(--surface-3);color:var(--ink-2);}
 .bucket-chip.b-none{color:var(--ink-muted);}
 .bucket-chip.b-0-7{background:color-mix(in srgb, var(--warning) 18%, transparent);color:var(--warning);}
@@ -203,6 +204,9 @@ tr.log-row td{background:var(--surface-2);white-space:normal;}
 
     <div class="card">
       <h2>Продление — заканчивается оплаченный срок аренды <span class="hint">«Дней просрочки»=0 в отчёте — день окончания уже оплаченного срока; оплата за следующий период вносится за 5 дней до этой даты — то есть уже сейчас. Действие нужно ДО того, как клиент технически уйдёт в просрочку (с 0-го дня по отчёту 1С).</span></h2>
+      <div class="filters">
+        <label><input type="checkbox" id="prolongOnlyMissingChk"> только без нужного действия</label>
+      </div>
       <div class="table-wrap"><table class="dyn" id="prolongTable"></table></div>
     </div>
 
@@ -221,6 +225,7 @@ tr.log-row td{background:var(--surface-2);white-space:normal;}
       <div class="filters">
         <input type="text" id="searchInput" placeholder="Поиск по названию…">
         <label><input type="checkbox" id="onlyWorseChk"> только ухудшившиеся</label>
+        <label><input type="checkbox" id="onlyMissingActionChk"> только без нужного действия</label>
         <select id="bucketFilter">
           <option value="">Все стадии</option>
           <option value="0-7">0–7 дней</option>
@@ -382,6 +387,7 @@ function computeClientLedger(bootstrapRow, actionsForClient, latestDailyRate){
 }
 
 let clientLedgers = new Map();
+let allActionsByClient = new Map();
 async function rebuildLedgers(){
   const { data: allSnaps } = await sb.from('sb_snapshots').select('client_key,client_raw,report_date,debt,advance,daily_payment,overdue_days').order('report_date',{ascending:true});
   const { data: allActions } = await sb.from('sb_actions').select('*').order('action_date',{ascending:true});
@@ -391,19 +397,51 @@ async function rebuildLedgers(){
     if(!bootstrapByClient.has(r.client_key)) bootstrapByClient.set(r.client_key, r);
     latestDailyByClient.set(r.client_key, r.daily_payment);
   });
-  const actionsByClient = new Map();
+  allActionsByClient = new Map();
   (allActions||[]).forEach(a=>{
-    if(!actionsByClient.has(a.client_key)) actionsByClient.set(a.client_key, []);
-    actionsByClient.get(a.client_key).push(a);
+    if(!allActionsByClient.has(a.client_key)) allActionsByClient.set(a.client_key, []);
+    allActionsByClient.get(a.client_key).push(a);
   });
   clientLedgers = new Map();
   bootstrapByClient.forEach((bootstrapRow, key)=>{
-    clientLedgers.set(key, computeClientLedger(bootstrapRow, actionsByClient.get(key), latestDailyByClient.get(key)));
+    clientLedgers.set(key, computeClientLedger(bootstrapRow, allActionsByClient.get(key), latestDailyByClient.get(key)));
   });
 }
 function debtForRow(r){
   const l = clientLedgers.get(r.client_key);
   return l ? l.debt : moneyAtStake(r);
+}
+
+/* ---------- expected action per zone of responsibility ----------
+   Зоны — продление (окно до просрочки), 0-7/8-14/15-21/22-28/29+. Если у контрагента
+   в его текущей зоне НИ РАЗУ не было залогировано ожидаемое для неё действие — это
+   считается пропущенным действием: подсвечиваем строку и даём фильтр "только без
+   действия", отдельно для каждой зоны. Проверяем по ВСЕЙ истории действий клиента
+   (не только по последнему), чтобы более позднее не связанное действие (например,
+   комментарий "Прочее") не затирало факт того, что нужное действие уже сделали.*/
+const EXPECTED_ACTIONS_BY_ZONE = {
+  'prolong': [INVOICE_ACTION, CONFIRMED_RETURN_ACTION],
+  '0-7': ['Звонок/переговоры','Подтверждение оплаты получено'],
+  '8-14': ['Претензия направлена'],
+  '15-21': ['Изъятие начато','Изъятие завершено'],
+  '22-28': ['Изъятие начато','Изъятие завершено'],
+  '29+': ['Передано в суд/банкротство', RECOVERY_ACTION, TONS_RETURN_ACTION]
+};
+const ZONE_TITLES = {'prolong':'Продление (до просрочки)','0-7':'Продление · 0–7 дней','8-14':'Претензии · 8–14 дней','15-21':'Изъятие · 15–21 день','22-28':'Изъятие · 22–28 дней','29+':'Взыскание · 29+'};
+function zoneForRow(r){
+  if(isProlongWindow(r.overdue_days)) return 'prolong';
+  return r.bucket || null;
+}
+function hasExpectedAction(clientKey, zone){
+  const expected = zone ? EXPECTED_ACTIONS_BY_ZONE[zone] : null;
+  if(!expected) return true;
+  const acts = allActionsByClient.get(clientKey) || [];
+  return acts.some(a=>expected.indexOf(a.action_type)!==-1);
+}
+function isMissingAction(r){
+  if(isConfirmedReturn(r.client_key)) return false;
+  const zone = zoneForRow(r);
+  return zone ? !hasExpectedAction(r.client_key, zone) : false;
 }
 
 function parseWorkbookRows(rows){
@@ -665,8 +703,10 @@ function renderKPIs(){
 
 /* ---------- prolongation window (before official overdue starts) ---------- */
 function renderProlongTable(){
-  const rows = dynamicsActive.filter(r=>isProlongWindow(r.overdue_days))
+  const onlyMissing = document.getElementById('prolongOnlyMissingChk').checked;
+  let rows = dynamicsActive.filter(r=>isProlongWindow(r.overdue_days))
     .sort((a,b)=>(a.overdue_days||0)-(b.overdue_days||0));
+  if(onlyMissing) rows = rows.filter(isMissingAction);
   const table = document.getElementById('prolongTable');
   if(!rows.length){
     table.innerHTML = '<tbody><tr><td style="color:var(--ink-muted);padding:8px;">Никого в этом окне сейчас нет.</td></tr></tbody>';
@@ -676,11 +716,12 @@ function renderProlongTable(){
   rows.forEach(r=>{
     const daysLeft = r.overdue_days!=null ? nf1.format(-r.overdue_days)+' дн.' : '—';
     const confirmed = isConfirmedReturn(r.client_key);
+    const missing = isMissingAction(r);
     const lastA = lastActionByClient.get(r.client_key);
     const statusHtml = confirmed
       ? '<span class="badge st-resolved">Возврат согласован</span>'
-      : (lastA ? '<span class="badge st-same">'+lastA.action_type+'</span>' : '<span class="badge st-new">Нужно действие</span>');
-    h += '<tr data-key="'+encodeURIComponent(r.client_key)+'">'
+      : (missing ? '<span class="badge st-new">Действие не зафиксировано</span>' : '<span class="badge st-same">'+lastA.action_type+'</span>');
+    h += '<tr data-key="'+encodeURIComponent(r.client_key)+'"'+(missing?' class="row-flag"':'')+'>'
       + '<td class="client">'+r.client_raw+(r.manager?'<span class="manager">'+r.manager+'</span>':'')+'</td>'
       + '<td class="num">'+daysLeft+'</td>'
       + '<td class="num">'+fmtTons((r.weight_kg||0)/1000)+'</td>'
@@ -713,15 +754,13 @@ function renderDeptTargets(){
 
   const sumMoney = rows => rows.reduce((s,r)=>s+debtForRow(r),0);
   const sumTons = rows => rows.reduce((s,r)=>s+(r.weight_kg||0),0)/1000;
-  const needsAction = (rows, doneTypes) => rows.filter(r=>{
-    const a = lastActionByClient.get(r.client_key);
-    return !a || doneTypes.indexOf(a.action_type)===-1;
-  });
+  const missingRows = rows => rows.filter(isMissingAction);
 
-  const claimPending = needsAction(b0814, ['Претензия направлена']);
+  const zone07Pending = missingRows(b07);
+  const claimPending = missingRows(b0814);
   const seizureRows = b1521.concat(b2228);
-  const seizurePending = needsAction(seizureRows, ['Изъятие начато','Изъятие завершено']);
-  const courtPending = needsAction(b29, ['Передано в суд/банкротство']);
+  const seizurePending = missingRows(seizureRows);
+  const courtPending = missingRows(b29);
   // 29+ — риск это и деньги, и тоннаж сразу: часть безнадёжных в суде взыскивается
   // деньгами, часть — физическим изъятием оборудования; отражаем оба канала и то,
   // что по ним уже фактически получено/возвращено, а не только то, что осталось.
@@ -730,7 +769,7 @@ function renderDeptTargets(){
   const b29TonsReturned = sumLedger(b29, 'cumulativeTonsReturned');
 
   const tiles = [
-    ['Продление · 0–7 дней', fmtRub(sumMoney(b07)), b07.length+' контрагентов — собрать до эскалации в претензию'],
+    ['Продление · 0–7 дней', fmtRub(sumMoney(b07)), zone07Pending.length+' из '+b07.length+' — без звонка/подтверждения оплаты'],
     ['Претензии · 8–14 дней', claimPending.length+' из '+b0814.length, 'ещё не направлена; под риском '+fmtRub(sumMoney(b0814))],
     ['Изъятие · 15–28 дней', fmtTons(sumTons(seizureRows)), seizurePending.length+' из '+seizureRows.length+' — не начато/не завершено'],
     ['Взыскание (суд) · 29+', fmtRub(sumMoney(b29))+' + '+fmtTons(sumTons(b29))+' под риском', courtPending.length+' из '+b29.length+' — ещё не передано в суд; уже взыскано '+fmtRub(b29Recovered)+', возвращено '+fmtTons(b29TonsReturned)],
@@ -789,11 +828,13 @@ function renderStageEfficiency(previousRows){
 function applyFilters(rows){
   const q = document.getElementById('searchInput').value.trim().toLowerCase();
   const onlyWorse = document.getElementById('onlyWorseChk').checked;
+  const onlyMissing = document.getElementById('onlyMissingActionChk').checked;
   const bucketF = document.getElementById('bucketFilter').value;
   return rows.filter(r=>{
     if(!r.bucket) return false; // active table = только те, кто сейчас в просрочке
     if(q && r.client_raw.toLowerCase().indexOf(q)===-1) return false;
     if(onlyWorse && r.status!=='worse') return false;
+    if(onlyMissing && !isMissingAction(r)) return false;
     if(bucketF && r.bucket!==bucketF) return false;
     return true;
   });
@@ -815,10 +856,11 @@ function renderMainTable(){
     const lastAction = lastActionByClient.get(r.client_key);
     const lastActionText = lastAction ? lastAction.action_type + ' (' + fmtDate(lastAction.action_date) + ')' : '—';
     const confirmed = isConfirmedReturn(r.client_key);
+    const missing = isMissingAction(r);
     const recommendedAction = confirmed
       ? '<span class="badge st-resolved">Возврат согласован</span> — не эскалировать, ожидается возврат оборудования'
-      : ACTION_BY_BUCKET[r.bucket||'null'];
-    h += '<tr data-key="'+encodeURIComponent(r.client_key)+'">'
+      : (missing ? '<span class="badge st-new">Действие не зафиксировано</span> — ' : '') + ACTION_BY_BUCKET[r.bucket||'null'];
+    h += '<tr data-key="'+encodeURIComponent(r.client_key)+'"'+(missing?' class="row-flag"':'')+'>'
       + '<td class="client">'+r.client_raw+(r.manager?'<span class="manager">'+r.manager+'</span>':'')+'</td>'
       + '<td><span class="badge st-'+r.status+'">'+STATUS_LABEL[r.status]+'</span></td>'
       + '<td class="num">'+(r.prev?fmtDays(r.prev.overdue_days)+'<span class="arrow">→</span>':'')+fmtDays(r.overdue_days)+'</td>'
@@ -983,7 +1025,8 @@ function renderResolvedTable(){
 }
 
 ['searchInput'].forEach(id=> document.getElementById(id).addEventListener('input', renderMainTable));
-['onlyWorseChk','bucketFilter'].forEach(id=> document.getElementById(id).addEventListener('change', renderMainTable));
+['onlyWorseChk','onlyMissingActionChk','bucketFilter'].forEach(id=> document.getElementById(id).addEventListener('change', renderMainTable));
+document.getElementById('prolongOnlyMissingChk').addEventListener('change', renderProlongTable);
 
 /* ---------- upload flow ---------- */
 document.getElementById('reportDateInput').value = new Date().toISOString().slice(0,10);
