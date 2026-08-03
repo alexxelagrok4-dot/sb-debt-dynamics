@@ -188,6 +188,11 @@ tr.log-row td{background:var(--surface-2);white-space:normal;}
     <div class="kpi-row" id="kpiRow"></div>
 
     <div class="card">
+      <h2>Продление — заканчивается оплаченный срок аренды <span class="hint">«Дней просрочки»=0 в отчёте — день окончания уже оплаченного срока; оплата за следующий период вносится за 5 дней до этой даты — то есть уже сейчас. Действие нужно ДО того, как клиент технически уйдёт в просрочку (с 0-го дня по отчёту 1С).</span></h2>
+      <div class="table-wrap"><table class="dyn" id="prolongTable"></table></div>
+    </div>
+
+    <div class="card">
       <h2>Задачи по отделам на этот период <span class="hint">считается из текущих данных — не отдельный ручной план</span></h2>
       <div class="kpi-row" id="deptRow"></div>
     </div>
@@ -258,7 +263,22 @@ const ACTION_BY_BUCKET = {
   '22-28':'100% изъятие оборудования',
   '29+':'Суд / процедура банкротства'
 };
-const ACTION_TYPES = ['Звонок/переговоры','Подтверждение оплаты получено','Претензия направлена','Изъятие начато','Изъятие завершено','Передано в суд/банкротство','Прочее'];
+const ACTION_TYPES = ['Счёт на продление выставлен','Подтверждено: возврат без продления','Звонок/переговоры','Подтверждение оплаты получено','Претензия направлена','Изъятие начато','Изъятие завершено','Передано в суд/банкротство','Прочее'];
+const CONFIRMED_RETURN_ACTION = 'Подтверждено: возврат без продления';
+// "Дней просрочки"=0 в отчёте — день окончания уже ОПЛАЧЕННОГО срока аренды (не дата
+// платежа). Оплата за следующий период вносится за PROLONG_WINDOW_DAYS дней ДО этой
+// даты — т.е. сам платёж должен пройти на отметке -PROLONG_WINDOW_DAYS. Окно от
+// -PROLONG_WINDOW_DAYS до 0 — это "оплата за продление уже должна была пройти, но
+// оплаченный срок ещё не закончился и официальной просрочки по 1С ещё нет": выставить
+// счёт на продление или получить подтверждение возврата без продления.
+const PROLONG_WINDOW_DAYS = 5;
+function isProlongWindow(days){
+  return days!==null && days!==undefined && days<0 && days>=-PROLONG_WINDOW_DAYS;
+}
+function isConfirmedReturn(clientKey){
+  const a = lastActionByClient.get(clientKey);
+  return !!a && a.action_type===CONFIRMED_RETURN_ACTION;
+}
 
 function normalizeClient(name){
   return String(name).replace(/\([^)]*\)/g,'').trim().replace(/\s+/g,' ').toUpperCase();
@@ -443,6 +463,7 @@ async function showPeriod(reportDate){
   await loadLastActions();
   document.getElementById('dashboardArea').style.display='block';
   renderKPIs();
+  renderProlongTable();
   renderDeptTargets();
   renderStageEfficiency(previousPeriodRows);
   renderMainTable();
@@ -467,7 +488,9 @@ function renderKPIs(){
   const resolvedCount = dynamicsResolved.length;
   const pct = tonsTotal>0 ? (tonsOverdue/tonsTotal*100) : 0;
 
+  const prolongCount = dynamicsActive.filter(r=>isProlongWindow(r.overdue_days) && !isConfirmedReturn(r.client_key)).length;
   const tiles = [
+    ['На продлении (до просрочки)', prolongCount, 'заканчивается оплаченный срок'],
     ['Контрагентов в просрочке', overdue.length, ''],
     ['Тоннаж в просрочке', fmtTons(tonsOverdue), 'из ' + fmtTons(tonsTotal) + ' у клиентов (' + nf1.format(pct) + '%)'],
     ['Долг просроченных, ₽', fmtRub(debtOverdue), ''],
@@ -481,13 +504,53 @@ function renderKPIs(){
   ).join('');
 }
 
+/* ---------- prolongation window (before official overdue starts) ---------- */
+function renderProlongTable(){
+  const rows = dynamicsActive.filter(r=>isProlongWindow(r.overdue_days))
+    .sort((a,b)=>(a.overdue_days||0)-(b.overdue_days||0));
+  const table = document.getElementById('prolongTable');
+  if(!rows.length){
+    table.innerHTML = '<tbody><tr><td style="color:var(--ink-muted);padding:8px;">Никого в этом окне сейчас нет.</td></tr></tbody>';
+    return;
+  }
+  let h = '<thead><tr><th>Контрагент</th><th>До конца оплаченного срока</th><th>Тоннаж, т</th><th>Статус</th><th></th></tr></thead><tbody>';
+  rows.forEach(r=>{
+    const daysLeft = r.overdue_days!=null ? nf1.format(-r.overdue_days)+' дн.' : '—';
+    const confirmed = isConfirmedReturn(r.client_key);
+    const lastA = lastActionByClient.get(r.client_key);
+    const statusHtml = confirmed
+      ? '<span class="badge st-resolved">Возврат согласован</span>'
+      : (lastA ? '<span class="badge st-same">'+lastA.action_type+'</span>' : '<span class="badge st-new">Нужно действие</span>');
+    h += '<tr data-key="'+encodeURIComponent(r.client_key)+'">'
+      + '<td class="client">'+r.client_raw+(r.manager?'<span class="manager">'+r.manager+'</span>':'')+'</td>'
+      + '<td class="num">'+daysLeft+'</td>'
+      + '<td class="num">'+fmtTons((r.weight_kg||0)/1000)+'</td>'
+      + '<td>'+statusHtml+'</td>'
+      + '<td><button class="chip-btn" data-toggle="'+encodeURIComponent(r.client_key)+'">Журнал</button></td>'
+      + '</tr>';
+    if(expandedClientKey === r.client_key){
+      h += '<tr class="log-row" data-logfor="'+encodeURIComponent(r.client_key)+'"><td colspan="5"><div class="log-box"></div></td></tr>';
+    }
+  });
+  h += '</tbody>';
+  table.innerHTML = h;
+  table.querySelectorAll('button[data-toggle]').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      const key = decodeURIComponent(btn.dataset.toggle);
+      expandedClientKey = (expandedClientKey===key) ? null : key;
+      renderProlongTable();
+      if(expandedClientKey===key) renderActionLog(key);
+    });
+  });
+}
+
 /* ---------- department targets (derived, not manually entered) ---------- */
 function renderDeptTargets(){
-  const b07 = dynamicsActive.filter(r=>r.bucket==='0-7');
-  const b0814 = dynamicsActive.filter(r=>r.bucket==='8-14');
-  const b1521 = dynamicsActive.filter(r=>r.bucket==='15-21');
-  const b2228 = dynamicsActive.filter(r=>r.bucket==='22-28');
-  const b29 = dynamicsActive.filter(r=>r.bucket==='29+');
+  const b07 = dynamicsActive.filter(r=>r.bucket==='0-7' && !isConfirmedReturn(r.client_key));
+  const b0814 = dynamicsActive.filter(r=>r.bucket==='8-14' && !isConfirmedReturn(r.client_key));
+  const b1521 = dynamicsActive.filter(r=>r.bucket==='15-21' && !isConfirmedReturn(r.client_key));
+  const b2228 = dynamicsActive.filter(r=>r.bucket==='22-28' && !isConfirmedReturn(r.client_key));
+  const b29 = dynamicsActive.filter(r=>r.bucket==='29+' && !isConfirmedReturn(r.client_key));
 
   const sumMoney = rows => rows.reduce((s,r)=>s+moneyAtStake(r),0);
   const sumTons = rows => rows.reduce((s,r)=>s+(r.weight_kg||0),0)/1000;
@@ -586,6 +649,10 @@ function renderMainTable(){
     const deltaText = r.prev ? (deltaDebt>=0?'+':'') + nf0.format(Math.round(deltaDebt)) : '—';
     const lastAction = lastActionByClient.get(r.client_key);
     const lastActionText = lastAction ? lastAction.action_type + ' (' + fmtDate(lastAction.action_date) + ')' : '—';
+    const confirmed = isConfirmedReturn(r.client_key);
+    const recommendedAction = confirmed
+      ? '<span class="badge st-resolved">Возврат согласован</span> — не эскалировать, ожидается возврат оборудования'
+      : ACTION_BY_BUCKET[r.bucket||'null'];
     h += '<tr data-key="'+encodeURIComponent(r.client_key)+'">'
       + '<td class="client">'+r.client_raw+(r.manager?'<span class="manager">'+r.manager+'</span>':'')+'</td>'
       + '<td><span class="badge st-'+r.status+'">'+STATUS_LABEL[r.status]+'</span></td>'
@@ -594,7 +661,7 @@ function renderMainTable(){
       + '<td class="num">'+fmtRub(r.debt)+'</td>'
       + '<td class="num">'+deltaText+'</td>'
       + '<td class="num">'+fmtTons((r.weight_kg||0)/1000)+'</td>'
-      + '<td class="action-col">'+ACTION_BY_BUCKET[r.bucket||'null']+'</td>'
+      + '<td class="action-col">'+recommendedAction+'</td>'
       + '<td class="action-col">'+lastActionText+'</td>'
       + '<td><button class="chip-btn" data-toggle="'+encodeURIComponent(r.client_key)+'">Журнал</button></td>'
       + '</tr>';
@@ -650,6 +717,12 @@ async function renderActionLog(clientKey){
     });
     if(insErr){ alert('Ошибка сохранения: '+insErr.message); return; }
     await loadLastActions();
+    // Действие могло изменить KPI, плановые показатели по отделам и статус в окне
+    // продления (например, "подтверждён возврат") — перерисовываем всё агрегированное,
+    // не только таблицу, где была открыта карточка.
+    renderKPIs();
+    renderDeptTargets();
+    renderProlongTable();
     renderMainTable();
     renderActionLog(clientKey);
   });
