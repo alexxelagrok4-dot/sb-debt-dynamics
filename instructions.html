@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ПРОДЛЕНИЕ-ВЗЫСКАНИЕ — инструкция</title>
+<style>
+:root{
+  --paper:#f3f6f8;
+  --paper-raised:#ffffff;
+  --ink:#16212c;
+  --ink-muted:#5c6b7a;
+  --line:#d8dfe5;
+  --accent:#2a5a8c;
+  --accent-soft:#e4edf5;
+  --accent-ink:#173a5c;
+  --warning:#a8710a;
+  --warning-soft:#f7ecd8;
+  --critical:#a83a34;
+  --critical-soft:#f7e2e0;
+  --good:#2f7d5a;
+  --good-soft:#e2f0e9;
+  --mono: ui-monospace, "Cascadia Code", Consolas, "SFMono-Regular", Menlo, monospace;
+  --serif: Georgia, "Iowan Old Style", "Times New Roman", serif;
+  --sans: -apple-system, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+}
+@media (prefers-color-scheme: dark){
+  :root{
+    --paper:#10161d;
+    --paper-raised:#161f28;
+    --ink:#e8edf2;
+    --ink-muted:#93a2b0;
+    --line:#26313c;
+    --accent:#6ba3d6;
+    --accent-soft:#1c2c3b;
+    --accent-ink:#bcdcf5;
+    --warning:#d8a23c;
+    --warning-soft:#2e2717;
+    --critical:#e0685f;
+    --critical-soft:#301c1a;
+    --good:#5cc290;
+    --good-soft:#16261f;
+  }
+}
+*{box-sizing:border-box;}
+html,body{margin:0;padding:0;}
+body{
+  background:var(--paper);
+  color:var(--ink);
+  font-family:var(--serif);
+  font-size:16.5px;
+  line-height:1.62;
+  -webkit-font-smoothing:antialiased;
+}
+::selection{background:var(--accent-soft);color:var(--accent-ink);}
+a{color:var(--accent-ink);}
+a:focus-visible, button:focus-visible, summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px;}
+
+.wrap{max-width:1180px;margin:0 auto;padding:0 28px;}
+
+header.masthead{
+  border-bottom:1px solid var(--line);
+  padding:56px 0 40px;
+  background:
+    linear-gradient(180deg, var(--accent-soft) 0%, transparent 100%);
+}
+.eyebrow{
+  font-family:var(--sans);
+  font-size:11.5px;
+  font-weight:700;
+  letter-spacing:.14em;
+  text-transform:uppercase;
+  color:var(--accent-ink);
+  margin:0 0 14px;
+}
+h1.title{
+  font-family:var(--sans);
+  font-weight:800;
+  font-size:clamp(30px, 4.2vw, 46px);
+  letter-spacing:-.01em;
+  margin:0 0 12px;
+  text-wrap:balance;
+}
+p.dek{
+  font-family:var(--serif);
+  font-size:18px;
+  color:var(--ink-muted);
+  max-width:62ch;
+  margin:0 0 26px;
+}
+.linkrow{display:flex;gap:14px;flex-wrap:wrap;align-items:center;}
+.pill{
+  font-family:var(--mono);
+  font-size:13.5px;
+  display:inline-flex;
+  align-items:center;
+  gap:8px;
+  background:var(--paper-raised);
+  border:1px solid var(--line);
+  border-radius:8px;
+  padding:9px 14px;
+  color:var(--ink);
+  text-decoration:none;
+}
+.pill.primary{
+  background:var(--accent);
+  border-color:var(--accent);
+  color:#fff;
+  font-weight:600;
+}
+.pill .dot{width:7px;height:7px;border-radius:50%;background:var(--good);flex:none;}
+
+.layout{
+  display:grid;
+  grid-template-columns:220px minmax(0,1fr);
+  gap:56px;
+  padding:48px 0 90px;
+  align-items:start;
+}
+nav.toc{
+  position:sticky;
+  top:28px;
+  font-family:var(--sans);
+  font-size:13px;
+}
+nav.toc ol{list-style:none;margin:0;padding:0;border-left:1px solid var(--line);}
+nav.toc li{margin:0;}
+nav.toc a{
+  display:block;
+  padding:7px 0 7px 16px;
+  color:var(--ink-muted);
+  text-decoration:none;
+  border-left:2px solid transparent;
+  margin-left:-1px;
+}
+nav.toc a:hover{color:var(--ink);border-left-color:var(--line);}
+nav.toc .num{font-family:var(--mono);color:var(--accent-ink);margin-right:8px;}
+
+main{min-width:0;}
+section.step{
+  padding:36px 0;
+  border-bottom:1px solid var(--line);
+  scroll-margin-top:24px;
+}
+section.step:first-child{padding-top:0;}
+.stephead{display:flex;align-items:baseline;gap:18px;margin-bottom:16px;}
+.stepnum{
+  font-family:var(--sans);
+  font-weight:800;
+  font-size:15px;
+  color:var(--accent-ink);
+  background:var(--accent-soft);
+  border-radius:999px;
+  width:34px;height:34px;
+  flex:none;
+  display:flex;align-items:center;justify-content:center;
+}
+h2{
+  font-family:var(--sans);
+  font-weight:750;
+  font-size:23px;
+  letter-spacing:-.005em;
+  margin:0;
+  text-wrap:balance;
+}
+h3{
+  font-family:var(--sans);
+  font-weight:700;
+  font-size:15px;
+  margin:26px 0 10px;
+  color:var(--ink);
+}
+.step p{margin:0 0 14px;max-width:66ch;}
+.step ol, .step ul{margin:0 0 14px;padding-left:1.3em;max-width:66ch;}
+.step li{margin-bottom:7px;}
+kbd, .field, .btn-ref{
+  font-family:var(--mono);
+  font-size:.88em;
+  background:var(--accent-soft);
+  color:var(--accent-ink);
+  padding:1.5px 6px;
+  border-radius:5px;
+  white-space:nowrap;
+}
+
+.callout{
+  display:flex;
+  gap:12px;
+  border:1px solid var(--line);
+  border-left:4px solid var(--accent);
+  background:var(--paper-raised);
+  border-radius:8px;
+  padding:14px 16px;
+  margin:16px 0;
+  font-family:var(--sans);
+  font-size:14.5px;
+  max-width:66ch;
+}
+.callout.warn{border-left-color:var(--warning);}
+.callout.warn .tag{color:var(--warning);background:var(--warning-soft);}
+.callout.good{border-left-color:var(--good);}
+.callout.good .tag{color:var(--good);background:var(--good-soft);}
+.callout .tag{
+  flex:none;
+  font-weight:700;
+  font-size:10.5px;
+  letter-spacing:.08em;
+  text-transform:uppercase;
+  padding:3px 7px;
+  border-radius:5px;
+  background:var(--accent-soft);
+  color:var(--accent-ink);
+  height:fit-content;
+}
+.callout p{margin:0;color:var(--ink);}
+
+.table-wrap{overflow-x:auto;margin:16px 0 20px;border:1px solid var(--line);border-radius:10px;}
+table{border-collapse:collapse;width:100%;font-family:var(--sans);font-size:13.8px;min-width:480px;}
+thead th{
+  text-align:left;
+  background:var(--accent-soft);
+  color:var(--accent-ink);
+  font-size:11px;
+  letter-spacing:.06em;
+  text-transform:uppercase;
+  font-weight:700;
+  padding:10px 14px;
+}
+tbody td{padding:11px 14px;border-top:1px solid var(--line);vertical-align:top;}
+tbody tr:nth-child(even){background:color-mix(in srgb, var(--paper-raised) 60%, var(--paper));}
+
+.actionlist{display:grid;gap:10px;margin:16px 0 20px;}
+.actionitem{
+  border:1px solid var(--line);
+  border-radius:9px;
+  padding:12px 15px;
+  background:var(--paper-raised);
+  font-family:var(--sans);
+  font-size:14px;
+}
+.actionitem b{font-family:var(--mono);font-size:.92em;color:var(--accent-ink);display:inline-block;margin-bottom:3px;}
+.actionitem p{margin:0;color:var(--ink-muted);font-family:var(--serif);font-size:15.5px;}
+
+footer{
+  border-top:1px solid var(--line);
+  padding:34px 0 60px;
+  font-family:var(--sans);
+  font-size:13px;
+  color:var(--ink-muted);
+}
+
+@media (max-width: 860px){
+  .layout{grid-template-columns:1fr;}
+  nav.toc{position:static;border-top:1px solid var(--line);padding-top:20px;}
+  nav.toc ol{columns:2;gap:0 24px;}
+}
+@media (prefers-reduced-motion: reduce){ *{scroll-behavior:auto !important;} }
+html{scroll-behavior:smooth;}
+</style>
+</head>
+<body>
+
+<header class="masthead">
+  <div class="wrap">
+    <p class="eyebrow">Служба безопасности · инструкция для сотрудников</p>
+    <h1 class="title">ПРОДЛЕНИЕ-ВЗЫСКАНИЕ</h1>
+    <p class="dek">Еженедельный контроль просроченной аренды: от первого входа в систему до журнала действий по каждому контрагенту.</p>
+    <div class="linkrow">
+      <a class="pill primary" href="./" target="_blank" rel="noopener">Открыть инструмент →</a>
+      <span class="pill"><span class="dot"></span> вход по логину, без почты</span>
+    </div>
+  </div>
+</header>
+
+<div class="wrap layout">
+  <nav class="toc" aria-label="Содержание">
+    <ol>
+      <li><a href="#reg"><span class="num">00</span>Регистрация</a></li>
+      <li><a href="#login"><span class="num">01</span>Вход и пароль</a></li>
+      <li><a href="#upload"><span class="num">02</span>Загрузка отчёта</a></li>
+      <li><a href="#period"><span class="num">03</span>Период и логика стадий</a></li>
+      <li><a href="#table"><span class="num">04</span>Таблица контрагентов</a></li>
+      <li><a href="#journal"><span class="num">05</span>Журнал действий</a></li>
+      <li><a href="#targets"><span class="num">06</span>Показатели отделов</a></li>
+      <li><a href="#resolved"><span class="num">07</span>Погашено / выбыло</a></li>
+      <li><a href="#anomalies"><span class="num">08</span>Замечания</a></li>
+      <li><a href="#trouble"><span class="num">09</span>Если не работает</a></li>
+      <li><a href="#admin"><span class="num">10</span>Администратору</a></li>
+    </ol>
+  </nav>
+
+  <main>
+
+    <section class="step" id="reg">
+      <div class="stephead"><span class="stepnum">00</span><h2>Регистрация — один раз</h2></div>
+      <ol>
+        <li>Откройте <a href="./" target="_blank" rel="noopener">ссылку на инструмент</a> в любом браузере — ничего устанавливать не нужно.</li>
+        <li>В поле <span class="field">Логин</span> укажите логин латиницей, без пробелов.</li>
+        <li>В поле <span class="field">Пароль</span> придумайте пароль (минимум 6 символов) и запомните его.</li>
+        <li>Нажмите <span class="btn-ref">Зарегистрироваться</span>, затем сразу <span class="btn-ref">Войти</span> — тем же логином и паролем. Писем и подтверждений нет.</li>
+      </ol>
+      <div class="callout good">
+        <span class="tag">Совет</span>
+        <p>Используйте часть вашей рабочей почты до <b>@dayagroup.ru</b> — например, для <code>ivanov@dayagroup.ru</code> логин <code>ivanov</code>. Технически не обязательно, но логины сотрудников будут узнаваемы в общих журналах.</p>
+      </div>
+      <div class="callout warn">
+        <span class="tag">Важно</span>
+        <p>Логин нельзя восстановить самостоятельно — записывайте его так же, как пароль. Если логин занят — при регистрации появится сообщение, попробуйте другой (например, добавьте букву фамилии).</p>
+      </div>
+    </section>
+
+    <section class="step" id="login">
+      <div class="stephead"><span class="stepnum">01</span><h2>Вход и забытый пароль</h2></div>
+      <p>Дальше — просто логин, пароль, <span class="btn-ref">Войти</span>. Данные общие для всей службы: все сотрудники с доступом видят одни и те же загрузки, долги и журналы действий.</p>
+      <p>Если забыли пароль — самостоятельно сбросить нельзя (почта не используется). Обратитесь к администратору — он сбросит пароль в панели управления (раздел «Администратору» ниже).</p>
+    </section>
+
+    <section class="step" id="upload">
+      <div class="stephead"><span class="stepnum">02</span><h2>Еженедельная загрузка отчёта</h2></div>
+      <ol>
+        <li>В карточке «Загрузка отчёта» выберите файл выгрузки из 1С — «отчёт СБ», формат .xlsx.</li>
+        <li>Укажите дату отчёта — за какое число выгрузка.</li>
+        <li>Нажмите <span class="btn-ref">Загрузить и обработать</span>.</li>
+      </ol>
+      <p>Инструмент сам построит динамику относительно предыдущей загрузки. Если файл не подходит — придёт понятное сообщение об ошибке вместо частично загруженных данных.</p>
+    </section>
+
+    <section class="step" id="period">
+      <div class="stephead"><span class="stepnum">03</span><h2>Период и логика стадий</h2></div>
+      <p>Карточка «Период» управляет тем, что именно вы сейчас смотрите:</p>
+      <ul>
+        <li><b>Показать динамику на дату</b> — какая загрузка отображается (по умолчанию — самая свежая).</li>
+        <li><b>Сравнить с периодом</b> — с какой более ранней загрузкой сравнивать; по умолчанию предыдущая неделя, но можно выбрать любую другую вручную.</li>
+      </ul>
+      <h3>Переключатель логики стадий</h3>
+      <div class="actionlist">
+        <div class="actionitem"><b>По деньгам · по умолчанию</b><p>Стадия 0–7/8–14/…/29+ считается от реально накопленного долга после того, как у клиента исчерпан аванс, в днях суточного платежа. Контрагент с остатком аванса не считается «в изъятии», даже если календарно 1С уже отсчитала много дней.</p></div>
+        <div class="actionitem"><b>Календарная · как в 1С</b><p>Прежняя логика 1С: дни считаются от даты окончания оплаченного периода напрямую, без учёта аванса. Совпадает с официальным файлом «Динамика СБ».</p></div>
+      </div>
+      <p>Переключается мгновенно и сразу пересчитывает все таблицы и показатели ниже — можно сверять обе картины.</p>
+    </section>
+
+    <section class="step" id="table">
+      <div class="stephead"><span class="stepnum">04</span><h2>Таблица «Контрагенты в просрочке»</h2></div>
+      <p>Фильтры над таблицей: поиск по названию, «только ухудшившиеся», «только без нужного действия», фильтр по конкретной стадии.</p>
+      <p>Строки без зафиксированного ожидаемого действия подсвечены и помечены бейджем «Действие не зафиксировано». У каждой зоны — своё ожидание:</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Зона</th><th>Ожидаемое действие</th></tr></thead>
+          <tbody>
+            <tr><td>Продление (до просрочки)</td><td>Счёт на продление выставлен / Подтверждено: возврат без продления</td></tr>
+            <tr><td>0–7 дней</td><td>Звонок/переговоры / Подтверждение оплаты получено</td></tr>
+            <tr><td>8–14 дней</td><td>Претензия направлена</td></tr>
+            <tr><td>15–21 и 22–28 дней</td><td>Изъятие начато / Изъятие завершено</td></tr>
+            <tr><td>29+ дней</td><td>Передано в суд/банкротство / Взыскано / Возврат оборудования</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="step" id="journal">
+      <div class="stephead"><span class="stepnum">05</span><h2>Журнал действий по контрагенту</h2></div>
+      <p>Кнопка <span class="btn-ref">Журнал</span> в строке контрагента открывает историю действий и сводку по долгу: накопленный долг, остаток аванса, суточный платёж, дата последнего учтённого периода, взыскано и возвращено всего.</p>
+      <p>В форме ниже можно отметить <b>несколько действий одновременно</b> одной датой:</p>
+      <div class="actionlist">
+        <div class="actionitem"><b>Счёт на продление выставлен</b><p>Появляется поле «Оплачен по дату» — укажите дату, по которую выставлен счёт. Отдельная дата действия не нужна. Сумма к долгу считается автоматически (суточный платёж × дни), сначала гасится из остатка аванса.</p></div>
+        <div class="actionitem"><b>Подтверждено: возврат без продления</b><p>Клиент подтвердил, что не продлевает аренду — исключается из плановых показателей отделов как ожидаемое, а не проблемное завершение.</p></div>
+        <div class="actionitem"><b>Подтверждение оплаты получено</b><p>Требует ручного ввода суммы оплаты — уменьшает накопленный долг на эту сумму.</p></div>
+        <div class="actionitem"><b>Взыскано (сумма получена)</b><p>Сумма, взысканная через суд/претензионную работу — уменьшает долг, добавляется в статистику «взыскано всего».</p></div>
+        <div class="actionitem"><b>Возврат оборудования (тоннаж зафиксирован)</b><p>Фактически возвращённый/изъятый тоннаж — идёт в статистику «возвращено тоннажа всего», на долг не влияет.</p></div>
+      </div>
+      <div class="callout warn">
+        <span class="tag">Проверка</span>
+        <p>Приложение не даст выставить счёт с датой раньше уже учтённого периода — если так происходит, проверьте дату в сводке по контрагенту.</p>
+      </div>
+    </section>
+
+    <section class="step" id="targets">
+      <div class="stephead"><span class="stepnum">06</span><h2>Плановые показатели по отделам</h2></div>
+      <p>Считаются автоматически из текущих данных, не вводятся вручную: сколько собрать на этапе продления, сколько претензий ещё не направлено, сколько тонн изъять, сколько денег и тоннажа под риском на стадии суда/взыскания — и сколько уже фактически взыскано/возвращено.</p>
+    </section>
+
+    <section class="step" id="resolved">
+      <div class="stephead"><span class="stepnum">07</span><h2>Погашено / выбыло из просрочки</h2></div>
+      <p>Таблица — контрагенты, полностью пропавшие из отчёта с прошлой загрузки. Кнопка <span class="btn-ref">Показать частичные погашения</span> раскрывает отдельный список: контрагенты, которые остались в отчёте, но у которых снизился долг и/или просроченный тоннаж — «долг уменьшился на X, осталось Y» или «долг полностью погашен».</p>
+      <p>Показывается только сама перемена за этот переход — если долг уже был закрыт раньше и с тех пор ничего не изменилось, запись повторно не появится.</p>
+    </section>
+
+    <section class="step" id="anomalies">
+      <div class="stephead"><span class="stepnum">08</span><h2>Автоматические замечания</h2></div>
+      <p>Кнопка <span class="btn-ref">Показать замечания</span> (появляется, только если есть что показать) раскрывает список несостыковок между этой и прошлой загрузкой: резкий скачок платежа или тоннажа, скачок сразу через несколько стадий, похожие названия в одной загрузке. Это повод перепроверить контрагента, не готовая ошибка.</p>
+    </section>
+
+    <section class="step" id="trouble">
+      <div class="stephead"><span class="stepnum">09</span><h2>Если что-то не работает</h2></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Проблема</th><th>Что делать</th></tr></thead>
+          <tbody>
+            <tr><td>«Такой логин уже занят» при регистрации</td><td>Логин уже зарегистрирован — попробуйте другой.</td></tr>
+            <tr><td>«Неверный логин или пароль»</td><td>Проверьте написание (с учётом регистра пароля). Не помните — см. «Забыли пароль».</td></tr>
+            <tr><td>«Файл не похож на «отчёт СБ»»</td><td>Выбран не тот файл — нужен именно еженедельный «отчёт СБ», не «Динамика СБ» и не другой отчёт.</td></tr>
+            <tr><td>«Дата счёта должна быть позже уже учтённого периода»</td><td>Укажите дату дальше уже зафиксированной в сводке контрагента.</td></tr>
+            <tr><td>Долг показывает 0, хотя должен быть больше</td><td>Проверьте переключатель «Логика стадий» — в денежном режиме контрагент с неисчерпанным авансом законно показывает 0.</td></tr>
+            <tr><td>Не вижу нужного контрагента</td><td>Проверьте фильтры — поиск, «только ухудшившиеся», «только без действия», стадию.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="step" id="admin" style="border-bottom:none;">
+      <div class="stephead"><span class="stepnum">10</span><h2>Администратору</h2></div>
+      <h3>Сброс пароля сотруднику</h3>
+      <ol>
+        <li>Зайдите на <b>supabase.com</b> → откройте проект → <b>Authentication → Users</b>.</li>
+        <li>Найдите сотрудника — логин <code>ivanov</code> виден как <code>ivanov@opalubka.invalid</code> (служебный технический адрес; реальная почта, включая <code>dayagroup.ru</code>, не задействована — на него ничего не приходит и не должно).</li>
+        <li>Откройте пользователя → задайте новый пароль через действие сброса в интерфейсе Supabase.</li>
+        <li>Сообщите сотруднику новый пароль любым удобным способом.</li>
+      </ol>
+      <p>Тем же способом можно заблокировать доступ сотруднику, который покинул компанию.</p>
+      <h3>Где что хранится</h3>
+      <p>Все данные — в общем Supabase-проекте компании. Список всех сделанных изменений в самом инструменте — в папке <code>changelog/</code> рядом с файлом инструмента, каждое изменение отдельным файлом.</p>
+    </section>
+
+  </main>
+</div>
+
+<footer>
+  <div class="wrap">ПРОДЛЕНИЕ-ВЗЫСКАНИЕ · внутренний инструмент службы безопасности · данные общие для всей команды</div>
+</footer>
+
+</body>
+</html>
