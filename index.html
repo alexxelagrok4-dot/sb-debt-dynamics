@@ -206,7 +206,8 @@ tr.log-row td{background:var(--surface-2);white-space:normal;}
 
     <div class="card" id="anomaliesCard" style="display:none;border-color:color-mix(in srgb, var(--critical) 35%, var(--border));">
       <h2>Автоматические замечания по загрузке <span class="hint">несостыковки между этой и прошлой загрузкой — не ошибки сами по себе, но стоит проверить</span></h2>
-      <div id="anomaliesList"></div>
+      <button class="btn small" id="anomaliesToggleBtn"></button>
+      <div id="anomaliesList" style="display:none;margin-top:10px;"></div>
     </div>
 
     <div class="card">
@@ -246,7 +247,9 @@ tr.log-row td{background:var(--surface-2);white-space:normal;}
     </div>
 
     <div class="card">
-      <h2>Погашено / выбыло из просрочки за период <span class="hint">были в прошлой загрузке, отсутствуют в текущей</span></h2>
+      <h2>Погашено / выбыло из просрочки за период <span class="hint">частично или полностью — включая тех, кто ещё остался в отчёте</span></h2>
+      <button class="btn small" id="partialResolveToggleBtn" style="display:none;"></button>
+      <div id="partialResolveList" style="display:none;margin:10px 0;"></div>
       <div class="table-wrap"><table class="dyn" id="resolvedTable"></table></div>
     </div>
   </div>
@@ -596,10 +599,12 @@ function computeAnomalies(currentRows, previousRows){
   }
   return anomalies;
 }
+let anomaliesExpanded = false;
 function renderAnomalies(currentRows, previousRows){
   const list = computeAnomalies(currentRows, previousRows);
   const card = document.getElementById('anomaliesCard');
   const box = document.getElementById('anomaliesList');
+  const btn = document.getElementById('anomaliesToggleBtn');
   if(!list.length){ card.style.display='none'; return; }
   card.style.display='block';
   box.innerHTML = list.map(a=>
@@ -608,7 +613,17 @@ function renderAnomalies(currentRows, previousRows){
     + '<span>'+a.text+'</span>'
     + '</div>'
   ).join('');
+  box.style.display = anomaliesExpanded ? '' : 'none';
+  btn.textContent = (anomaliesExpanded?'Свернуть':'Показать')+' замечания ('+list.length+')';
 }
+document.getElementById('anomaliesToggleBtn').addEventListener('click', ()=>{
+  anomaliesExpanded = !anomaliesExpanded;
+  const box = document.getElementById('anomaliesList');
+  const btn = document.getElementById('anomaliesToggleBtn');
+  box.style.display = anomaliesExpanded ? '' : 'none';
+  const count = box.children.length;
+  btn.textContent = (anomaliesExpanded?'Свернуть':'Показать')+' замечания ('+count+')';
+});
 
 const STATUS_LABEL = {worse:'Ухудшение', better:'Улучшение', same:'Без изменений', new:'Новый'};
 const STATUS_WEIGHT = {worse:3, new:2, same:1, better:0};
@@ -762,6 +777,7 @@ async function recomputeAndRenderPeriod(){
   renderStageEfficiency(previousPeriodRows);
   renderMainTable();
   renderResolvedTable();
+  renderPartialResolutions();
 }
 
 async function loadLastActions(){
@@ -990,7 +1006,9 @@ function renderMainTable(){
 
 function actionExtraText(a){
   const parts = [];
-  if(a.invoice_period_end) parts.push('по '+fmtDate(a.invoice_period_end));
+  // Дата счёта теперь совпадает с датой самой записи в журнале (см. форму выше) —
+  // не дублируем её ещё раз в скобках, если это ровно та же дата.
+  if(a.invoice_period_end && a.invoice_period_end!==a.action_date) parts.push('по '+fmtDate(a.invoice_period_end));
   if(a.payment_amount!==null && a.payment_amount!==undefined) parts.push(fmtRub(a.payment_amount));
   if(a.recovered_amount!==null && a.recovered_amount!==undefined) parts.push(fmtRub(a.recovered_amount));
   if(a.tons_returned!==null && a.tons_returned!==undefined) parts.push(fmtTons(a.tons_returned));
@@ -1033,7 +1051,7 @@ async function renderActionLog(clientKey){
     + '<div id="paymentAmountWrap" class="cond-field" style="display:none;"><label>Сумма оплаты, ₽: <input type="number" id="paymentAmountInput" min="0" step="1"></label></div>'
     + '<div id="recoveredAmountWrap" class="cond-field" style="display:none;"><label>Взыскано, ₽: <input type="number" id="recoveredAmountInput" min="0" step="1"></label></div>'
     + '<div id="tonsReturnedWrap" class="cond-field" style="display:none;"><label>Возвращено, т: <input type="number" id="tonsReturnedInput" min="0" step="0.1"></label></div>'
-    + '<input type="date" id="newActionDate" value="'+new Date().toISOString().slice(0,10)+'">'
+    + '<div id="genericDateWrap"><input type="date" id="newActionDate" value="'+new Date().toISOString().slice(0,10)+'"></div>'
     + '<textarea id="newActionComment" placeholder="Комментарий (необязательно)"></textarea>'
     + '<button class="btn primary small" id="saveActionBtn">Сохранить</button>'
     + '</div>';
@@ -1050,14 +1068,18 @@ async function renderActionLog(clientKey){
       syncCondField(PAYMENT_ACTION, 'paymentAmountWrap');
       syncCondField(RECOVERY_ACTION, 'recoveredAmountWrap');
       syncCondField(TONS_RETURN_ACTION, 'tonsReturnedWrap');
+      // Для счёта на продление значение имеет только дата, по которую он выставлен —
+      // отдельная "дата действия" ему не нужна (используем дату счёта и для неё).
+      // Общее поле даты остаётся видимым только если отмечено что-то ЕЩЁ, кроме счёта.
+      const checkedNow = [...box.querySelectorAll('.actionChk:checked')].map(c=>c.value);
+      const onlyInvoice = checkedNow.length===1 && checkedNow[0]===INVOICE_ACTION;
+      document.getElementById('genericDateWrap').style.display = onlyInvoice ? 'none' : '';
     });
   });
 
   document.getElementById('saveActionBtn').addEventListener('click', async ()=>{
     const checked = [...box.querySelectorAll('.actionChk:checked')].map(c=>c.value);
     if(!checked.length){ alert('Отметьте хотя бы одно действие.'); return; }
-    const actionDate = document.getElementById('newActionDate').value;
-    if(!actionDate){ alert('Укажите дату действия.'); return; }
     const comment = document.getElementById('newActionComment').value.trim();
 
     let invoiceEndDate = null, paymentAmount = null, recoveredAmount = null, tonsReturned = null;
@@ -1065,6 +1087,14 @@ async function renderActionLog(clientKey){
       invoiceEndDate = document.getElementById('invoiceEndDate').value;
       if(!invoiceEndDate){ alert('Укажите дату, по которую выставлен счёт.'); return; }
       if(ledger && invoiceEndDate<=ledger.lastPeriodEnd){ alert('Дата счёта должна быть позже уже учтённого периода ('+fmtDate(ledger.lastPeriodEnd)+').'); return; }
+    }
+    // Для счёта на продление дата действия в журнале — сама дата счёта; для остальных
+    // отмеченных действий — общая дата (нужна, только если отмечено что-то кроме счёта).
+    const onlyInvoice = checked.length===1 && checked[0]===INVOICE_ACTION;
+    let actionDate = invoiceEndDate;
+    if(!onlyInvoice){
+      actionDate = document.getElementById('newActionDate').value;
+      if(!actionDate){ alert('Укажите дату действия.'); return; }
     }
     if(checked.indexOf(PAYMENT_ACTION)!==-1){
       const v = Number(document.getElementById('paymentAmountInput').value);
@@ -1086,7 +1116,7 @@ async function renderActionLog(clientKey){
     const rows = checked.map(actionType=>{
       const rec = {
         client_key: clientKey, client_raw: clientRow?clientRow.client_raw:clientKey,
-        action_type: actionType, action_date: actionDate, comment: comment||null,
+        action_type: actionType, action_date: actionType===INVOICE_ACTION ? invoiceEndDate : actionDate, comment: comment||null,
         created_by: session.user.id, created_by_email: session.user.email
       };
       if(actionType===INVOICE_ACTION) rec.invoice_period_end = invoiceEndDate;
@@ -1106,6 +1136,7 @@ async function renderActionLog(clientKey){
     renderDeptTargets();
     renderProlongTable();
     renderMainTable();
+    renderPartialResolutions();
     renderActionLog(clientKey);
   });
 }
@@ -1126,6 +1157,56 @@ function renderResolvedTable(){
   h += '</tbody>';
   table.innerHTML = h;
 }
+
+/* ---------- partial resolutions (client still in report, but debt/tonnage dropped) ----------
+   dynamicsResolved ловит только тех, кто целиком пропал из отчёта. Но часто контрагент
+   остаётся в отчёте — просто у него уменьшился (или обнулился) долг/просроченный тоннаж
+   за неделю. Показываем это отдельно, тут же, но только само ИЗМЕНЕНИЕ за этот переход
+   (было → стало): если долг уже был закрыт на прошлой неделе и с тех пор ничего не
+   изменилось — новой строки не будет, т.к. дельта равна нулю. */
+function computePartialResolutions(){
+  const items = [];
+  dynamicsActive.forEach(r=>{
+    if(!r.prev) return;
+    const prevDebt = r.prev.debt||0;
+    const curDebt = debtForRow(r);
+    const prevTons = (r.prev.weight_kg||0)/1000;
+    const curTons = (r.weight_kg||0)/1000;
+    const debtDelta = prevDebt - curDebt;
+    const tonsDelta = prevTons - curTons;
+    if(debtDelta<=1 && tonsDelta<=0.01) return;
+    const parts = [];
+    if(debtDelta>1){
+      parts.push(curDebt<=0
+        ? ('долг полностью погашен (было '+fmtRub(prevDebt)+')')
+        : ('долг уменьшился на '+fmtRub(debtDelta)+', осталось '+fmtRub(curDebt)));
+    }
+    if(tonsDelta>0.01){
+      parts.push(curTons<=0.05
+        ? ('тоннаж полностью возвращён (было '+fmtTons(prevTons)+')')
+        : ('тоннаж уменьшился на '+fmtTons(tonsDelta)+', осталось '+fmtTons(curTons)));
+    }
+    items.push({client_raw:r.client_raw, manager:r.manager, text:parts.join('; '), sortKey: debtDelta+tonsDelta*1000});
+  });
+  items.sort((a,b)=>b.sortKey-a.sortKey);
+  return items;
+}
+let partialResolveExpanded = false;
+function renderPartialResolutions(){
+  const items = computePartialResolutions();
+  const btn = document.getElementById('partialResolveToggleBtn');
+  const box = document.getElementById('partialResolveList');
+  if(!items.length){ btn.style.display='none'; box.style.display='none'; return; }
+  btn.style.display='inline-block';
+  // client_raw уже содержит менеджера в скобках — второй раз его не добавляем.
+  box.innerHTML = items.map(it=>'<div class="log-entry"><span>'+it.client_raw+': '+it.text+'.</span></div>').join('');
+  box.style.display = partialResolveExpanded ? '' : 'none';
+  btn.textContent = (partialResolveExpanded?'Свернуть':'Показать')+' частичные погашения ('+items.length+')';
+}
+document.getElementById('partialResolveToggleBtn').addEventListener('click', ()=>{
+  partialResolveExpanded = !partialResolveExpanded;
+  renderPartialResolutions();
+});
 
 ['searchInput'].forEach(id=> document.getElementById(id).addEventListener('input', renderMainTable));
 ['onlyWorseChk','onlyMissingActionChk','bucketFilter'].forEach(id=> document.getElementById(id).addEventListener('change', renderMainTable));
