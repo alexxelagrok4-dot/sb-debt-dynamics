@@ -202,6 +202,12 @@ tr.log-row td{background:var(--surface-2);white-space:normal;}
   </div>
 
   <div id="dashboardArea" style="display:none;">
+    <div class="card" id="periodChangeCard" style="display:none;">
+      <h2>Изменения за период <span class="hint">по сравнению с периодом сопоставления, выбранным выше — нажмите на плитку, чтобы увидеть, за счёт чего</span></h2>
+      <div class="kpi-row" id="periodChangeRow"></div>
+      <div id="periodChangeDrilldown" style="display:none;"></div>
+    </div>
+
     <div class="kpi-row" id="kpiRow"></div>
 
     <div class="card" id="anomaliesCard" style="display:none;border-color:color-mix(in srgb, var(--critical) 35%, var(--border));">
@@ -771,6 +777,7 @@ async function recomputeAndRenderPeriod(){
 
   document.getElementById('dashboardArea').style.display='block';
   renderKPIs();
+  renderPeriodChangePanel();
   renderAnomalies(currentPeriodRows, previousPeriodRows);
   renderProlongTable();
   renderDeptTargets();
@@ -812,6 +819,179 @@ function renderKPIs(){
   document.getElementById('kpiRow').innerHTML = tiles.map(t=>
     '<div class="kpi"><div class="label">'+t[0]+'</div><div class="value">'+t[1]+'</div>'+(t[2]?'<div class="sub">'+t[2]+'</div>':'')+'</div>'
   ).join('');
+}
+
+/* ---------- period-over-period change panel (debt & tonnage, by stage) ----------
+   Заглавные плитки — дельта тех же двух величин, что и в основных KPI («Долг
+   просроченных», «Тоннаж в просрочке»): тот же критерий "кто вообще считается
+   просроченным" (сырой бакет 1С, r.bucket) — чтобы итоговое "стало" в этой плитке
+   всегда совпадало с цифрой в верхнем KPI. Разбивка по стадиям при клике берёт
+   категорию строки из effectiveZone()/effectiveZoneAsOf() (реагирует на переключатель
+   "Логика стадий", как и весь остальной интерфейс); если денежная логика не относит
+   просроченную (по 1С) строку ни к одной стадии — аванс перекрывает накопленный долг —
+   используем сырой бакет 1С как запасной вариант, иначе сумма строк разбивки не
+   сходилась бы с итогом плитки. */
+function zoneOrFallback(effZone, rawBucket){ return effZone || rawBucket || null; }
+function overdueGate(r){ return !!r.bucket; }
+
+function rowsByBucket(rows, isCurrentSide){
+  const map = new Map(BUCKET_LABELS.map(b=>[b,[]]));
+  rows.forEach(r=>{
+    if(!overdueGate(r)) return;
+    const zone = zoneOrFallback(isCurrentSide ? effectiveZone(r) : effectiveZoneAsOf(r), r.bucket);
+    if(zone && map.has(zone)) map.get(zone).push(r);
+  });
+  return map;
+}
+
+// Мост для одной стадии: "новые" (появились в этой стадии, которых не было в ней
+// на прошлой загрузке — неважно, не было их вообще или они были в другой стадии),
+// "выбывшие" (были в этой стадии, сейчас не в ней — погашено, ушли из отчёта или
+// перешли в другую стадию) и "изменение у оставшихся" (были в этой стадии и на
+// прошлой, и на этой загрузке — просто выросла/снизилась сумма). Три числа всегда
+// в точности складываются в разницу "стало минус было" для этой стадии.
+function computeBridgeForSet(prevRowsInBucket, curRowsInBucket, prevValue, curValue){
+  const prevByKey = new Map(prevRowsInBucket.map(r=>[r.client_key, r]));
+  const curByKey = new Map(curRowsInBucket.map(r=>[r.client_key, r]));
+  const enteringRows=[], leavingRows=[], continuingRows=[];
+  curRowsInBucket.forEach(r=>{
+    const p = prevByKey.get(r.client_key);
+    if(!p) enteringRows.push({row:r, prevVal:0, curVal:curValue(r), delta:curValue(r)});
+    else continuingRows.push({row:r, prevVal:prevValue(p), curVal:curValue(r), delta:curValue(r)-prevValue(p)});
+  });
+  prevRowsInBucket.forEach(p=>{
+    if(!curByKey.has(p.client_key)) leavingRows.push({row:p, prevVal:prevValue(p), curVal:0, delta:-prevValue(p)});
+  });
+  const entering = enteringRows.reduce((s,x)=>s+x.delta,0);
+  const leaving = leavingRows.reduce((s,x)=>s+x.delta,0);
+  const continuing = continuingRows.reduce((s,x)=>s+x.delta,0);
+  const prevTotal = prevRowsInBucket.reduce((s,r)=>s+prevValue(r),0);
+  const curTotal = curRowsInBucket.reduce((s,r)=>s+curValue(r),0);
+  return {entering, leaving, continuing, delta: entering+leaving+continuing, prevTotal, curTotal, enteringRows, leavingRows, continuingRows};
+}
+
+// "Было" для долга — сырая колонка 1С на дату прошлого отчёта (как и в
+// computePartialResolutions ниже); "стало" — накопитель приложения (debtForRow),
+// как везде в текущих таблицах и KPI. Для тоннажа накопителя нет — сырой вес с обеих
+// сторон.
+function computePeriodChange(metric){
+  const prevValue = metric==='debt' ? (p=>p.debt||0) : (p=>(p.weight_kg||0)/1000);
+  const curValue = metric==='debt' ? (r=>debtForRow(r)) : (r=>(r.weight_kg||0)/1000);
+  const prevByBucket = rowsByBucket(previousPeriodRows, false);
+  const curByBucket = rowsByBucket(dynamicsActive, true);
+  const rows = BUCKET_LABELS.map(b=>Object.assign({bucket:b}, computeBridgeForSet(prevByBucket.get(b), curByBucket.get(b), prevValue, curValue)));
+  const total = rows.reduce((acc,r)=>({
+    entering: acc.entering+r.entering, leaving: acc.leaving+r.leaving, continuing: acc.continuing+r.continuing,
+    delta: acc.delta+r.delta, prevTotal: acc.prevTotal+r.prevTotal, curTotal: acc.curTotal+r.curTotal,
+    enteringRows: acc.enteringRows.concat(r.enteringRows), leavingRows: acc.leavingRows.concat(r.leavingRows), continuingRows: acc.continuingRows.concat(r.continuingRows)
+  }), {entering:0,leaving:0,continuing:0,delta:0,prevTotal:0,curTotal:0,enteringRows:[],leavingRows:[],continuingRows:[]});
+  return {rows, total};
+}
+
+let periodChangeOpenMetric = null; // null | 'debt' | 'tons'
+let periodChangeExpandedBucket = null; // null | bucket label | '__total__' — какая строка разбивки развёрнута до клиентов
+let lastPeriodChange = null; // {debt, tons} — кэш последнего расчёта для отрисовки разбивки без пересчёта
+function deltaColor(delta){ return delta>0 ? 'var(--critical)' : (delta<0 ? 'var(--good)' : 'var(--ink-muted)'); }
+
+function renderPeriodChangePanel(){
+  const card = document.getElementById('periodChangeCard');
+  if(!previousPeriodRows || !previousPeriodRows.length){
+    card.style.display='none';
+    lastPeriodChange = null;
+    return;
+  }
+  card.style.display='block';
+  lastPeriodChange = { debt: computePeriodChange('debt'), tons: computePeriodChange('tons') };
+  const fmt = {debt:fmtRub, tons:fmtTons};
+  const label = {debt:'Долг просроченных', tons:'Тоннаж в просрочке'};
+  document.getElementById('periodChangeRow').innerHTML = ['debt','tons'].map(key=>{
+    const ch = lastPeriodChange[key], d = ch.total.delta;
+    const sign = d>0 ? '+' : (d<0 ? '−' : '');
+    return '<div class="kpi" style="cursor:pointer;'+(periodChangeOpenMetric===key?'border-color:var(--accent);':'')+'" data-metric="'+key+'">'
+      + '<div class="label">'+label[key]+'</div>'
+      + '<div class="value">'+fmt[key](ch.total.curTotal)+'</div>'
+      + '<div class="sub" style="color:'+deltaColor(d)+';font-weight:700;">'+sign+fmt[key](Math.abs(d))+' к прошлому периоду</div>'
+      + '<div class="sub">было '+fmt[key](ch.total.prevTotal)+' · нажмите — за счёт чего</div>'
+      + '</div>';
+  }).join('');
+  document.querySelectorAll('#periodChangeRow [data-metric]').forEach(el=>{
+    el.addEventListener('click', ()=>{
+      const m = el.dataset.metric;
+      periodChangeOpenMetric = (periodChangeOpenMetric===m) ? null : m;
+      periodChangeExpandedBucket = null;
+      renderPeriodChangePanel();
+    });
+  });
+  renderPeriodChangeDrilldown();
+}
+
+// Клиенты внутри одной группы моста (новые/выбывшие/изменение у оставшихся),
+// отсортированные по величине вклада — сначала те, кто сильнее всего сдвинул стадию.
+function renderClientDeltaGroup(title, items, fmt){
+  if(!items.length) return '';
+  const sorted = items.slice().sort((a,b)=>Math.abs(b.delta)-Math.abs(a.delta));
+  let h = '<div style="margin-bottom:12px;"><div style="font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--ink-2);margin-bottom:5px;">'+title+' ('+items.length+')</div>';
+  h += '<table class="dyn" style="width:100%;"><tbody>';
+  sorted.forEach(x=>{
+    const r = x.row;
+    h += '<tr><td class="client">'+r.client_raw+(r.manager?'<span class="manager">'+r.manager+'</span>':'')+'</td>'
+      + '<td class="num">'+fmt(x.prevVal)+'</td>'
+      + '<td class="num">'+fmt(x.curVal)+'</td>'
+      + '<td class="num" style="color:'+deltaColor(x.delta)+';font-weight:600;">'+(x.delta>0?'+':'')+fmt(x.delta)+'</td></tr>';
+  });
+  h += '</tbody></table></div>';
+  return h;
+}
+function renderBridgeClientDetail(bridge, fmt){
+  let h = '<div class="log-box">';
+  h += renderClientDeltaGroup('Новые в стадии', bridge.enteringRows, fmt);
+  h += renderClientDeltaGroup('Выбывшие из стадии', bridge.leavingRows, fmt);
+  h += renderClientDeltaGroup('Изменение у оставшихся', bridge.continuingRows, fmt);
+  if(!bridge.enteringRows.length && !bridge.leavingRows.length && !bridge.continuingRows.length){
+    h += '<div class="note">Никого нет.</div>';
+  }
+  h += '</div>';
+  return h;
+}
+
+function renderPeriodChangeDrilldown(){
+  const box = document.getElementById('periodChangeDrilldown');
+  if(!periodChangeOpenMetric || !lastPeriodChange){ box.style.display='none'; box.innerHTML=''; return; }
+  const ch = lastPeriodChange[periodChangeOpenMetric];
+  const fmt = periodChangeOpenMetric==='debt' ? fmtRub : fmtTons;
+  const label = periodChangeOpenMetric==='debt' ? 'долг' : 'тоннаж';
+  let h = '<h3 style="font-size:12px;text-transform:uppercase;letter-spacing:0.05em;color:var(--ink-2);margin:14px 0 8px;">Разбивка по стадиям — '+label+' <span class="hint">нажмите на строку — список клиентов</span></h3>'
+    + '<div class="table-wrap"><table class="dyn"><thead><tr>'
+    + '<th>Стадия</th><th>Было</th><th>Стало</th><th>Δ</th><th>Новые в стадии</th><th>Выбывшие из стадии</th><th>Изменение у оставшихся</th>'
+    + '</tr></thead><tbody>';
+  function row(key, titleHtml, r, bold){
+    const expanded = periodChangeExpandedBucket===key;
+    let out = '<tr data-bucket-key="'+key+'" style="cursor:pointer;'+(bold?'font-weight:700;background:var(--surface-2);':'')+(expanded?'box-shadow:inset 3px 0 0 var(--accent);':'')+'">'
+      + '<td>'+titleHtml+'</td>'
+      + '<td class="num">'+fmt(r.prevTotal)+'</td>'
+      + '<td class="num">'+fmt(r.curTotal)+'</td>'
+      + '<td class="num" style="color:'+deltaColor(r.delta)+';">'+(r.delta>0?'+':'')+fmt(r.delta)+'</td>'
+      + '<td class="num">'+(r.entering>0?'+':'')+fmt(r.entering)+'</td>'
+      + '<td class="num">'+fmt(r.leaving)+'</td>'
+      + '<td class="num">'+(r.continuing>0?'+':'')+fmt(r.continuing)+'</td>'
+      + '</tr>';
+    if(expanded){
+      out += '<tr class="log-row" data-bucket-detail="'+key+'"><td colspan="7">'+renderBridgeClientDetail(r, fmt)+'</td></tr>';
+    }
+    return out;
+  }
+  ch.rows.forEach(r=>{ h += row(r.bucket, bucketChip(r.bucket), r, false); });
+  h += row('__total__', 'Итого', ch.total, true);
+  h += '</tbody></table></div>';
+  box.innerHTML = h;
+  box.style.display='block';
+  box.querySelectorAll('tr[data-bucket-key]').forEach(tr=>{
+    tr.addEventListener('click', ()=>{
+      const key = tr.dataset.bucketKey;
+      periodChangeExpandedBucket = (periodChangeExpandedBucket===key) ? null : key;
+      renderPeriodChangeDrilldown();
+    });
+  });
 }
 
 /* ---------- prolongation window (before official overdue starts) ---------- */
