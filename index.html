@@ -258,6 +258,15 @@ tr.log-row td{background:var(--surface-2);white-space:normal;}
       <div id="partialResolveList" style="display:none;margin:10px 0;"></div>
       <div class="table-wrap"><table class="dyn" id="resolvedTable"></table></div>
     </div>
+
+    <div class="card">
+      <h2>Прогноз задолженности на дату <span class="hint">отдельный инструмент — не влияет на стадии, KPI и панель «Изменения за период»; показывает, каким станет факт. долг, если контрагент не заплатит и не вернёт оборудование до выбранной даты</span></h2>
+      <div class="field-row">
+        <label for="forecastDateInput">Дата прогноза:</label>
+        <input type="date" id="forecastDateInput">
+      </div>
+      <div class="table-wrap"><table class="dyn" id="forecastTable"></table></div>
+    </div>
   </div>
 </div>
 
@@ -348,12 +357,34 @@ function bucketClass(bucket){
 function bucketChip(bucket){
   return '<span class="'+bucketClass(bucket)+'">'+(bucket?BUCKET_TITLES[bucket]:'не просрочен')+'</span>';
 }
-// На ранних стадиях (0–7, 8–14 дней) "Задолженность" в 1С часто пуста — клиент ещё
-// проедает аванс, формальный долг не зафиксирован. "Прогноз задолженности" считается
-// всегда, поэтому для агрегированных сумм (сколько денег под риском) используем факт,
-// если он есть, иначе прогноз — так плитки не показывают ложный ноль там, где риск реален.
-function moneyAtStake(r){
-  return (r.debt!==null && r.debt!==undefined) ? r.debt : (r.forecast_debt||0);
+// «Задолженность» (сырая колонка 1С) по устройству исходной таблицы — это НЕ факт
+// за уже потреблённые дни аренды, а ОЖИДАЕМЫЙ долг за БУДУЩИЙ период по условиям
+// предоплаты (оплата вносится за 5 дней до начала нового периода; если её нет —
+// менеджер уже видит контрагента должником, хотя тот может вернуть оборудование,
+// не начав толком новый период). Поэтому эта колонка не участвует в расчёте стадии
+// и факт. долга — показывается только справочно в карточке клиента (см. changelog).
+// Факт. долг на дату отчёта = «Прогноз задолженности» (пересчитывается 1С заново на
+// дату отчёта из остатка аванса и суточного платежа) за вычетом остатка аванса.
+function factualDebtOf(row){
+  return Math.max(0, (row.forecast_debt||0) - (row.advance||0));
+}
+// Чистая позиция в днях на дату отчёта: > 0 — столько дней аванса ещё в запасе (не
+// в долге); < 0 — столько дней контрагент уже фактически в долгу; null — нет
+// суточного платежа, спроецировать нельзя. Единая основа и для классификации по
+// стадиям "сейчас" (elapsed=0), и для проекции долга на будущую дату (elapsed>0).
+function netDaysPosition(advance, debt, rate){
+  if(!rate || rate<=0) return null;
+  return ((advance||0) - (debt||0)) / rate;
+}
+function daysOverdueAt(advance, debt, rate, fromDateStr, targetDateStr){
+  const net = netDaysPosition(advance, debt, rate);
+  if(net===null) return (debt||0)>(advance||0) ? Infinity : 0;
+  const elapsed = (!targetDateStr || targetDateStr===fromDateStr) ? 0 : daysBetween(fromDateStr, targetDateStr);
+  return Math.max(0, elapsed - net);
+}
+function projectedDebtAt(advance, debt, rate, fromDateStr, targetDateStr){
+  if(!rate || rate<=0) return Math.max(0, (debt||0)-(advance||0));
+  return rate * daysOverdueAt(advance, debt, rate, fromDateStr, targetDateStr);
 }
 
 /* ---------- debt ledger (analytical accumulator, not a one-off extrapolation) ----------
@@ -380,10 +411,18 @@ function addDaysStr(dateStr, n){ const d=toUTCDate(dateStr); d.setUTCDate(d.getU
 // что 1С ещё физически не могла учесть в след. выгрузке.
 function computeClientLedger(baselineRow, actionsForClient, dailyRateOverride, cutoffDate){
   if(!baselineRow) return null;
-  let advance = baselineRow.advance || 0;
-  let debt = baselineRow.debt || 0;
-  let lastPeriodEnd = addDaysStr(baselineRow.report_date, -(baselineRow.overdue_days||0));
   const rate = (dailyRateOverride!==null && dailyRateOverride!==undefined) ? dailyRateOverride : (baselineRow.daily_payment||0);
+  // База накопителя — факт. долг (из «Прогноза задолженности», не сырой
+  // «Задолженности» — см. factualDebtOf выше) и остаток аванса, взаимоисключающие
+  // на старте, как и далее по ходу проигрывания действий.
+  let debt = factualDebtOf(baselineRow);
+  let advance = Math.max(0, (baselineRow.advance||0) - (baselineRow.forecast_debt||0));
+  const netAtBaseline = netDaysPosition(baselineRow.advance, baselineRow.forecast_debt, rate);
+  let lastPeriodEnd = addDaysStr(baselineRow.report_date, netAtBaseline===null ? 0 : Math.round(netAtBaseline));
+  // Дата, на которую действителен текущий debt/advance — для проекции на будущую
+  // дату (см. projectedDebtFromLedger): начинается с даты базового отчёта и
+  // сдвигается вперёд на дату каждого учтённого дальше действия.
+  let asOfDate = baselineRow.report_date;
 
   const allActions = actionsForClient||[];
   // Взыскано/возвращено тоннажа — это накопительная статистика за всё время
@@ -402,6 +441,7 @@ function computeClientLedger(baselineRow, actionsForClient, dailyRateOverride, c
       return String(a.created_at||'').localeCompare(String(b.created_at||''));
     });
   relevant.forEach(a=>{
+    asOfDate = a.action_date;
     if(a.action_type===INVOICE_ACTION && a.invoice_period_end){
       const days = daysBetween(lastPeriodEnd, a.invoice_period_end);
       if(days>0){
@@ -416,14 +456,20 @@ function computeClientLedger(baselineRow, actionsForClient, dailyRateOverride, c
       debt = Math.max(0, debt - a.recovered_amount);
     }
   });
-  return { debt, advance, dailyRate: rate, lastPeriodEnd, cumulativeRecovered, cumulativeTonsReturned };
+  return { debt, advance, dailyRate: rate, lastPeriodEnd, asOfDate, cumulativeRecovered, cumulativeTonsReturned };
+}
+// Проекция факт. долга из накопителя на произвольную будущую дату — отдельный
+// инструмент («Прогноз задолженности на дату»), не влияет на стадии/KPI/динамику.
+function projectedDebtFromLedger(ledger, targetDateStr){
+  if(!ledger) return 0;
+  return projectedDebtAt(ledger.advance, ledger.debt, ledger.dailyRate, ledger.asOfDate, targetDateStr);
 }
 
 let clientLedgers = new Map();
 let allActionsByClient = new Map();
 let clientLatestSnapshotByKey = new Map();
 async function rebuildLedgers(){
-  const { data: allSnaps } = await sb.from('sb_snapshots').select('client_key,client_raw,report_date,debt,advance,daily_payment,overdue_days').order('report_date',{ascending:true});
+  const { data: allSnaps } = await sb.from('sb_snapshots').select('client_key,client_raw,report_date,debt,advance,daily_payment,forecast_debt,overdue_days').order('report_date',{ascending:true});
   const { data: allActions } = await sb.from('sb_actions').select('*').order('action_date',{ascending:true});
   clientLatestSnapshotByKey = new Map();
   (allSnaps||[]).forEach(r=>{ clientLatestSnapshotByKey.set(r.client_key, r); }); // ascending order => last write = latest
@@ -439,7 +485,7 @@ async function rebuildLedgers(){
 }
 function debtForRow(r){
   const l = clientLedgers.get(r.client_key);
-  return l ? l.debt : moneyAtStake(r);
+  return l ? l.debt : factualDebtOf(r);
 }
 
 /* ---------- debt-based stage classification (not calendar-based) ----------
@@ -456,10 +502,6 @@ function debtDaysToZone(days){
   if(days<=21) return '15-21';
   if(days<=28) return '22-28';
   return '29+';
-}
-function daysFromDebtAndRate(debt, rate){
-  if(!rate || rate<=0) return debt>0 ? Infinity : 0;
-  return debt/rate;
 }
 // Стадия строки, которая является САМЫМ СВЕЖИМ известным снэпшотом клиента —
 // используем накопитель (clientLedgers), который "доигрывает" вперёд действия,
@@ -483,19 +525,36 @@ function effectiveZone(r){
   if(stageLogicMode==='calendar') return r.bucket || null;
   if(isLatestSnapshotForClient(r)){
     const l = clientLedgers.get(r.client_key);
-    const debt = l ? l.debt : (r.debt||0);
-    const rate = r.daily_payment || (l && l.dailyRate) || 0;
-    return debtDaysToZone(daysFromDebtAndRate(debt, rate));
+    if(l) return debtDaysToZone(daysOverdueAt(l.advance, l.debt, l.dailyRate, l.asOfDate, null));
   }
-  return debtDaysToZone(daysFromDebtAndRate(r.debt||0, r.daily_payment||0));
+  return debtDaysToZone(daysOverdueAt(r.advance, r.forecast_debt, r.daily_payment, r.report_date, null));
 }
 // Историческая стадия "на дату" — для строк ПРЕДЫДУЩЕГО периода при сравнении
 // динамики: та строка сама по себе уже была самой свежей на СВОЮ дату, поэтому её
-// собственные "Задолженность"/"Суточный платёж" и есть корректное "было" (в денежном
-// режиме); в календарном режиме — её собственный бакет 1С на ту дату.
+// собственные "Прогноз задолженности"/"Аванс"/"Суточный платёж" и есть корректное
+// "было" (в денежном режиме); в календарном режиме — её собственный бакет 1С на ту дату.
+// Отображаемое число "Дней просрочки" — должно считаться той же логикой, что и
+// bucketChip рядом с ним (effectiveZone/effectiveZoneAsOf), иначе колонка "Дней
+// просрочки" и колонка "Стадия" в одной строке расходятся: в денежном режиме
+// сырая колонка 1С "Дней просрочки" — календарная величина, к текущей денежной
+// стадии отношения не имеющая (см. changelog 0011 про "Задолженность"/"Прогноз
+// задолженности" — "Дней просрочки" считается 1С по той же калейндарной логике).
+// В календарном режиме совпадает с сырой колонкой 1С, как и раньше.
+function displayedOverdueDays(r){
+  if(stageLogicMode==='calendar') return r.overdue_days;
+  if(isLatestSnapshotForClient(r)){
+    const l = clientLedgers.get(r.client_key);
+    if(l) return daysOverdueAt(l.advance, l.debt, l.dailyRate, l.asOfDate, null);
+  }
+  return daysOverdueAt(r.advance, r.forecast_debt, r.daily_payment, r.report_date, null);
+}
+function displayedOverdueDaysAsOf(r){
+  if(stageLogicMode==='calendar') return r.overdue_days;
+  return daysOverdueAt(r.advance, r.forecast_debt, r.daily_payment, r.report_date, null);
+}
 function effectiveZoneAsOf(r){
   if(stageLogicMode==='calendar') return r.bucket || null;
-  return debtDaysToZone(daysFromDebtAndRate(r.debt||0, r.daily_payment||0));
+  return debtDaysToZone(daysOverdueAt(r.advance, r.forecast_debt, r.daily_payment, r.report_date, null));
 }
 
 /* ---------- expected action per zone of responsibility ----------
@@ -785,6 +844,9 @@ async function recomputeAndRenderPeriod(){
   renderMainTable();
   renderResolvedTable();
   renderPartialResolutions();
+  const forecastInput = document.getElementById('forecastDateInput');
+  if(!forecastInput.value && currentPeriodRows.length) forecastInput.value = endOfMonthStr(currentPeriodRows[0].report_date);
+  renderForecastTable();
 }
 
 async function loadLastActions(){
@@ -795,7 +857,7 @@ async function loadLastActions(){
 
 /* ---------- KPIs ---------- */
 function renderKPIs(){
-  const overdue = dynamicsActive.filter(r=>r.bucket);
+  const overdue = dynamicsActive.filter(r=>effectiveZone(r)!==null);
   const tonsOverdue = overdue.reduce((s,r)=>s+(r.weight_kg||0),0)/1000;
   const tonsTotal = dynamicsActive.reduce((s,r)=>s+(r.weight_kg||0),0)/1000;
   const debtOverdue = overdue.reduce((s,r)=>s+debtForRow(r),0);
@@ -810,7 +872,7 @@ function renderKPIs(){
     ['На продлении (до просрочки)', prolongCount, 'заканчивается оплаченный срок'],
     ['Контрагентов в просрочке', overdue.length, ''],
     ['Тоннаж в просрочке', fmtTons(tonsOverdue), 'из ' + fmtTons(tonsTotal) + ' у клиентов (' + nf1.format(pct) + '%)'],
-    ['Долг просроченных (накоплено), ₽', fmtRub(debtOverdue), 'считается приложением: аванс+долг 1С на старте, дальше — счета/оплаты/взыскания'],
+    ['Долг просроченных (накоплено), ₽', fmtRub(debtOverdue), 'факт. долг из аванса и прогноза задолженности 1С на старте, дальше — счета/оплаты/взыскания'],
     ['Ухудшилось', worse, 'за период'],
     ['Улучшилось', better, 'за период'],
     ['Новые в просрочке', isNew, ''],
@@ -824,21 +886,15 @@ function renderKPIs(){
 /* ---------- period-over-period change panel (debt & tonnage, by stage) ----------
    Заглавные плитки — дельта тех же двух величин, что и в основных KPI («Долг
    просроченных», «Тоннаж в просрочке»): тот же критерий "кто вообще считается
-   просроченным" (сырой бакет 1С, r.bucket) — чтобы итоговое "стало" в этой плитке
-   всегда совпадало с цифрой в верхнем KPI. Разбивка по стадиям при клике берёт
-   категорию строки из effectiveZone()/effectiveZoneAsOf() (реагирует на переключатель
-   "Логика стадий", как и весь остальной интерфейс); если денежная логика не относит
-   просроченную (по 1С) строку ни к одной стадии — аванс перекрывает накопленный долг —
-   используем сырой бакет 1С как запасной вариант, иначе сумма строк разбивки не
-   сходилась бы с итогом плитки. */
-function zoneOrFallback(effZone, rawBucket){ return effZone || rawBucket || null; }
-function overdueGate(r){ return !!r.bucket; }
-
+   просроченным" (effectiveZone/effectiveZoneAsOf) — чтобы итоговое "стало" в этой
+   плитке всегда совпадало с цифрой в верхнем KPI. Разбивка по стадиям при клике
+   берёт категорию строки из тех же функций (реагирует на переключатель "Логика
+   стадий", как и весь остальной интерфейс). Эта панель НЕ зависит от инструмента
+   «Прогноз задолженности на дату» ниже — сравнивает только фактические периоды. */
 function rowsByBucket(rows, isCurrentSide){
   const map = new Map(BUCKET_LABELS.map(b=>[b,[]]));
   rows.forEach(r=>{
-    if(!overdueGate(r)) return;
-    const zone = zoneOrFallback(isCurrentSide ? effectiveZone(r) : effectiveZoneAsOf(r), r.bucket);
+    const zone = isCurrentSide ? effectiveZone(r) : effectiveZoneAsOf(r);
     if(zone && map.has(zone)) map.get(zone).push(r);
   });
   return map;
@@ -870,12 +926,12 @@ function computeBridgeForSet(prevRowsInBucket, curRowsInBucket, prevValue, curVa
   return {entering, leaving, continuing, delta: entering+leaving+continuing, prevTotal, curTotal, enteringRows, leavingRows, continuingRows};
 }
 
-// "Было" для долга — сырая колонка 1С на дату прошлого отчёта (как и в
+// "Было" для долга — факт. долг прошлого отчёта (factualDebtOf, как и в
 // computePartialResolutions ниже); "стало" — накопитель приложения (debtForRow),
 // как везде в текущих таблицах и KPI. Для тоннажа накопителя нет — сырой вес с обеих
 // сторон.
 function computePeriodChange(metric){
-  const prevValue = metric==='debt' ? (p=>p.debt||0) : (p=>(p.weight_kg||0)/1000);
+  const prevValue = metric==='debt' ? (p=>factualDebtOf(p)) : (p=>(p.weight_kg||0)/1000);
   const curValue = metric==='debt' ? (r=>debtForRow(r)) : (r=>(r.weight_kg||0)/1000);
   const prevByBucket = rowsByBucket(previousPeriodRows, false);
   const curByBucket = rowsByBucket(dynamicsActive, true);
@@ -1124,12 +1180,11 @@ function applyFilters(rows){
   const onlyMissing = document.getElementById('onlyMissingActionChk').checked;
   const bucketF = document.getElementById('bucketFilter').value;
   return rows.filter(r=>{
-    // "В просрочке" по 1С (календарно) — это состав таблицы, как и раньше; а вот
-    // РЕАЛЬНАЯ стадия/зона внутри неё уже денежная (effectiveZone), поэтому клиент,
-    // которого 1С календарно отметила, но у которого ещё есть аванс, всё равно виден
-    // (можно открыть журнал и выставить следующий счёт), просто со стадией
-    // "не просрочен" — а не потерян из вида и не посчитан как под изъятием.
-    if(!r.bucket) return false;
+    // Состав таблицы — те, у кого effectiveZone относит к какой-либо стадии (денежная
+    // логика: факт. долг из аванса и прогноза задолженности 1С, а не сырая календарная
+    // колонка 1С — которая может быть неактуальна для контрагентов с остановленным
+    // начислением). В календарном режиме effectiveZone совпадает с сырым бакетом 1С.
+    if(!effectiveZone(r)) return false;
     if(q && r.client_raw.toLowerCase().indexOf(q)===-1) return false;
     if(onlyWorse && r.status!=='worse') return false;
     if(onlyMissing && !isMissingAction(r)) return false;
@@ -1160,7 +1215,7 @@ function renderMainTable(){
     h += '<tr data-key="'+encodeURIComponent(r.client_key)+'"'+(missing?' class="row-flag"':'')+'>'
       + '<td class="client">'+r.client_raw+(r.manager?'<span class="manager">'+r.manager+'</span>':'')+'</td>'
       + '<td><span class="badge st-'+r.status+'">'+STATUS_LABEL[r.status]+'</span> '+(r.prev?bucketChip(effectiveZoneAsOf(r.prev))+'<span class="arrow">→</span>':'')+bucketChip(zone)+'</td>'
-      + '<td class="num">'+(r.prev?fmtDays(r.prev.overdue_days)+'<span class="arrow">→</span>':'')+fmtDays(r.overdue_days)+'</td>'
+      + '<td class="num">'+(r.prev?fmtDays(displayedOverdueDaysAsOf(r.prev))+'<span class="arrow">→</span>':'')+fmtDays(displayedOverdueDays(r))+'</td>'
       + '<td class="num">'+fmtRub(debtForRow(r))+'</td>'
       + '<td class="num">'+fmtTons((r.weight_kg||0)/1000)+'</td>'
       + '<td class="action-col">'+recommendedAction+'</td>'
@@ -1214,7 +1269,7 @@ async function renderActionLog(clientKey){
     + '<div><b>Остаток аванса:</b> '+fmtRub(ledger?ledger.advance:null)+'</div>'
     + '<div><b>Суточный платёж:</b> '+fmtRub(ledger?ledger.dailyRate:null)+'/сут</div>'
     + '<div><b>Оплачен период по:</b> '+fmtDate(ledger?ledger.lastPeriodEnd:null)+'</div>'
-    + '<div><b>Долг по 1С на отчёт:</b> '+fmtRub(clientRow?clientRow.debt:null)+' (Δ за неделю '+deltaText+')</div>'
+    + '<div><b>Ожидаемый долг за след. период (по 1С, справочно):</b> '+fmtRub(clientRow?clientRow.debt:null)+' (Δ за неделю '+deltaText+')</div>'
     + '<div><b>Взыскано всего:</b> '+fmtRub(ledger?ledger.cumulativeRecovered:0)+'</div>'
     + '<div><b>Возвращено тоннажа:</b> '+fmtTons(ledger?ledger.cumulativeTonsReturned:0)+'</div>'
     + '</div>';
@@ -1348,7 +1403,7 @@ function computePartialResolutions(){
   const items = [];
   dynamicsActive.forEach(r=>{
     if(!r.prev) return;
-    const prevDebt = r.prev.debt||0;
+    const prevDebt = factualDebtOf(r.prev);
     const curDebt = debtForRow(r);
     const prevTons = (r.prev.weight_kg||0)/1000;
     const curTons = (r.weight_kg||0)/1000;
@@ -1387,6 +1442,53 @@ document.getElementById('partialResolveToggleBtn').addEventListener('click', ()=
   partialResolveExpanded = !partialResolveExpanded;
   renderPartialResolutions();
 });
+
+/* ---------- debt forecast to a chosen future date (standalone tool) ----------
+   Не влияет на стадии/KPI/панель "Изменения за период" — отдельная проекция факт.
+   долга вперёд по формуле аванс/суточный платёж, в предположении, что до выбранной
+   даты не будет ни оплат, ни возврата оборудования. По умолчанию — конец месяца
+   текущего выбранного периода. */
+function endOfMonthStr(dateStr){
+  const d = toUTCDate(dateStr);
+  const end = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth()+1, 0));
+  return end.toISOString().slice(0,10);
+}
+function renderForecastTable(){
+  const box = document.getElementById('forecastTable');
+  const targetDate = document.getElementById('forecastDateInput').value;
+  if(!targetDate || !dynamicsActive.length){ box.innerHTML=''; return; }
+  const rows = dynamicsActive.map(r=>{
+    const ledger = isLatestSnapshotForClient(r) ? clientLedgers.get(r.client_key) : null;
+    const nowDebt = ledger ? ledger.debt : factualDebtOf(r);
+    const projected = ledger
+      ? projectedDebtFromLedger(ledger, targetDate)
+      : projectedDebtAt(r.advance, r.forecast_debt, r.daily_payment, r.report_date, targetDate);
+    return {row:r, nowDebt, projected, growth: projected-nowDebt};
+  }).filter(x=>x.projected>0 || (x.row.weight_kg||0)>0)
+    .sort((a,b)=>b.projected-a.projected);
+  const totals = rows.reduce((acc,x)=>({
+    tons: acc.tons+(x.row.weight_kg||0)/1000, nowDebt: acc.nowDebt+x.nowDebt, projected: acc.projected+x.projected, growth: acc.growth+x.growth
+  }), {tons:0, nowDebt:0, projected:0, growth:0});
+  let h = '<thead><tr><th>Контрагент</th><th>Тоннаж, т</th><th>Факт. долг сейчас</th><th>Прогноз на дату</th><th>Прирост</th></tr></thead><tbody>';
+  if(rows.length){
+    h += '<tr style="font-weight:700;background:var(--surface-2);"><td>ИТОГО</td>'
+      + '<td class="num">'+fmtTons(totals.tons)+'</td>'
+      + '<td class="num">'+fmtRub(totals.nowDebt)+'</td>'
+      + '<td class="num">'+fmtRub(totals.projected)+'</td>'
+      + '<td class="num" style="color:'+deltaColor(totals.growth)+';">'+(totals.growth>0?'+':'')+fmtRub(totals.growth)+'</td></tr>';
+  }
+  if(!rows.length){ h += '<tr><td colspan="5" style="color:var(--ink-muted);padding:8px;">Нет контрагентов с долгом или оборудованием на руках.</td></tr>'; }
+  rows.forEach(x=>{
+    h += '<tr><td class="client">'+x.row.client_raw+(x.row.manager?'<span class="manager">'+x.row.manager+'</span>':'')+'</td>'
+      + '<td class="num">'+fmtTons((x.row.weight_kg||0)/1000)+'</td>'
+      + '<td class="num">'+fmtRub(x.nowDebt)+'</td>'
+      + '<td class="num" style="font-weight:700;">'+fmtRub(x.projected)+'</td>'
+      + '<td class="num" style="color:'+deltaColor(x.growth)+';">'+(x.growth>0?'+':'')+fmtRub(x.growth)+'</td></tr>';
+  });
+  h += '</tbody>';
+  box.innerHTML = h;
+}
+document.getElementById('forecastDateInput').addEventListener('change', renderForecastTable);
 
 ['searchInput'].forEach(id=> document.getElementById(id).addEventListener('input', renderMainTable));
 ['onlyWorseChk','onlyMissingActionChk','bucketFilter'].forEach(id=> document.getElementById(id).addEventListener('change', renderMainTable));
