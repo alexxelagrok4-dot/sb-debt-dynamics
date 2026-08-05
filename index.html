@@ -236,11 +236,6 @@ tr.log-row td{background:var(--surface-2);white-space:normal;}
     </div>
 
     <div class="card">
-      <h2>Эффективность по стадиям <span class="hint">что случилось с теми, кто был в стадии на прошлой загрузке — конверсия в деньги/тонны</span></h2>
-      <div class="table-wrap"><table class="dyn" id="efficiencyTable"></table></div>
-    </div>
-
-    <div class="card">
       <h2>Контрагенты в просрочке <span class="hint">стадия считается от накопленного долга (после того, как исчерпан аванс), в днях суточного платежа — а не от календарных дней 1С; по умолчанию — сначала ухудшившиеся</span></h2>
       <div class="filters">
         <input type="text" id="searchInput" placeholder="Поиск по названию…">
@@ -847,7 +842,6 @@ async function recomputeAndRenderPeriod(){
   renderAnomalies(currentPeriodRows, previousPeriodRows);
   renderProlongTable();
   renderDeptTargets();
-  renderStageEfficiency(previousPeriodRows);
   renderMainTable();
   renderResolvedTable();
   renderPartialResolutions();
@@ -1052,7 +1046,19 @@ function renderClientDeltaGroup(title, items, fmt, noteFn){
 function renderBridgeClientDetail(bridge, fmt, prevZoneByKey, curZoneByKey){
   let h = '<div class="log-box">';
   h += renderClientDeltaGroup('Пришли в стадию', bridge.enteringRows, fmt, x=>originLabel(x.row.client_key, prevZoneByKey));
-  h += renderClientDeltaGroup('Ушли из стадии', bridge.leavingRows, fmt, x=>destinationLabel(x.row.client_key, curZoneByKey));
+  let leavingTitle = 'Ушли из стадии';
+  if(bridge.leavingRows.length){
+    const bucketSeverity = severityOf(bridge.bucket);
+    let resolved=0, escalated=0, improved=0;
+    bridge.leavingRows.forEach(x=>{
+      const destZone = curZoneByKey.get(x.row.client_key);
+      if(destZone===undefined || destZone===null) resolved++;
+      else if(severityOf(destZone)>bucketSeverity) escalated++;
+      else improved++;
+    });
+    leavingTitle += ' — из них погашено/выбыло '+resolved+', эскалировало '+escalated+', улучшилось '+improved;
+  }
+  h += renderClientDeltaGroup(leavingTitle, bridge.leavingRows, fmt, x=>destinationLabel(x.row.client_key, curZoneByKey));
   h += renderClientDeltaGroup('Остались в стадии (изменилась сумма)', bridge.continuingRows, fmt);
   if(!bridge.enteringRows.length && !bridge.leavingRows.length && !bridge.continuingRows.length){
     h += '<div class="note">Никого нет.</div>';
@@ -1276,56 +1282,6 @@ function renderDeptTargets(){
   document.getElementById('deptRow').innerHTML = tiles.map(t=>
     '<div class="kpi"><div class="label">'+t[0]+'</div><div class="value">'+t[1]+'</div><div class="sub">'+t[2]+'</div></div>'
   ).join('');
-}
-
-/* ---------- stage efficiency / conversion to money ---------- */
-function computeStageEfficiency(previousRows){
-  const resolvedKeys = new Set(dynamicsResolved.map(r=>r.client_key));
-  const activeByKey = new Map(dynamicsActive.map(r=>[r.client_key, r]));
-  return BUCKET_LABELS.map(b=>{
-    const was = (previousRows||[]).filter(p=>effectiveZoneAsOf(p)===b);
-    let resolvedCount=0, resolvedDebt=0, betterCount=0, sameCount=0, worseCount=0;
-    was.forEach(p=>{
-      // debtForRow(p) не годится здесь: p — строка ПРОШЛОГО периода, а debtForRow
-      // всегда подтягивает СЕГОДНЯШНИЙ накопитель по этому client_key (см. баг с
-      // "Под риском" в стадии 22-28 — 58 контрагентов оценивались по их ТЕКУЩЕМУ
-      // долгу, а не по долгу на момент прошлой загрузки). "Было" — только
-      // factualDebtOf(p), как и в computePeriodChange/computePartialResolutions.
-      if(resolvedKeys.has(p.client_key)){ resolvedCount++; resolvedDebt += factualDebtOf(p); return; }
-      const cur = activeByKey.get(p.client_key);
-      if(!cur) return;
-      if(cur.status==='better') betterCount++;
-      else if(cur.status==='same') sameCount++;
-      else if(cur.status==='worse') worseCount++;
-    });
-    const totalDebt = was.reduce((s,p)=>s+factualDebtOf(p),0);
-    const convPct = totalDebt>0 ? (resolvedDebt/totalDebt*100) : null;
-    return { bucket:b, count: was.length, totalDebt, resolvedCount, betterCount, sameCount, worseCount, convPct };
-  });
-}
-function renderStageEfficiency(previousRows){
-  const table = document.getElementById('efficiencyTable');
-  if(!previousRows || !previousRows.length){
-    table.innerHTML = '<tbody><tr><td style="color:var(--ink-muted);padding:8px;">Нет данных за предыдущий период для расчёта конверсии.</td></tr></tbody>';
-    return;
-  }
-  const rows = computeStageEfficiency(previousRows);
-  let h = '<thead><tr><th>Стадия (было на прошлой загрузке)</th><th>Контрагентов</th><th>Под риском, ₽</th><th>Погашено/выбыло</th><th>Улучшилось</th><th>Без изменений</th><th>Эскалировано</th><th>Конверсия в деньги</th></tr></thead><tbody>';
-  rows.forEach(r=>{
-    if(r.count===0){ h += '<tr><td>'+BUCKET_TITLES[r.bucket]+'</td><td colspan="7" style="color:var(--ink-muted);">никого не было</td></tr>'; return; }
-    h += '<tr>'
-      + '<td>'+bucketChip(r.bucket)+'</td>'
-      + '<td class="num">'+r.count+'</td>'
-      + '<td class="num">'+fmtRub(r.totalDebt)+'</td>'
-      + '<td class="num">'+r.resolvedCount+' ('+nf1.format(r.count?r.resolvedCount/r.count*100:0)+'%)</td>'
-      + '<td class="num">'+r.betterCount+'</td>'
-      + '<td class="num">'+r.sameCount+'</td>'
-      + '<td class="num">'+r.worseCount+'</td>'
-      + '<td class="num">'+(r.convPct!=null?nf1.format(r.convPct)+'%':'—')+'</td>'
-      + '</tr>';
-  });
-  h += '</tbody>';
-  table.innerHTML = h;
 }
 
 /* ---------- main table ---------- */
