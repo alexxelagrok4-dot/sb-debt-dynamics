@@ -1286,14 +1286,19 @@ function computeStageEfficiency(previousRows){
     const was = (previousRows||[]).filter(p=>effectiveZoneAsOf(p)===b);
     let resolvedCount=0, resolvedDebt=0, betterCount=0, sameCount=0, worseCount=0;
     was.forEach(p=>{
-      if(resolvedKeys.has(p.client_key)){ resolvedCount++; resolvedDebt += debtForRow(p); return; }
+      // debtForRow(p) не годится здесь: p — строка ПРОШЛОГО периода, а debtForRow
+      // всегда подтягивает СЕГОДНЯШНИЙ накопитель по этому client_key (см. баг с
+      // "Под риском" в стадии 22-28 — 58 контрагентов оценивались по их ТЕКУЩЕМУ
+      // долгу, а не по долгу на момент прошлой загрузки). "Было" — только
+      // factualDebtOf(p), как и в computePeriodChange/computePartialResolutions.
+      if(resolvedKeys.has(p.client_key)){ resolvedCount++; resolvedDebt += factualDebtOf(p); return; }
       const cur = activeByKey.get(p.client_key);
       if(!cur) return;
       if(cur.status==='better') betterCount++;
       else if(cur.status==='same') sameCount++;
       else if(cur.status==='worse') worseCount++;
     });
-    const totalDebt = was.reduce((s,p)=>s+debtForRow(p),0);
+    const totalDebt = was.reduce((s,p)=>s+factualDebtOf(p),0);
     const convPct = totalDebt>0 ? (resolvedDebt/totalDebt*100) : null;
     return { bucket:b, count: was.length, totalDebt, resolvedCount, betterCount, sameCount, worseCount, convPct };
   });
