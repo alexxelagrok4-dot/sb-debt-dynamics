@@ -208,6 +208,12 @@ tr.log-row td{background:var(--surface-2);white-space:normal;}
       <div id="periodChangeDrilldown" style="display:none;"></div>
     </div>
 
+    <div class="card" id="collectionPotentialCard" style="display:none;">
+      <h2>Потенциал сбора за период <span class="hint">суточный платёж за сданный в аренду тоннаж и максимально возможный сбор при 100% дисциплине — не зависит от долга/просрочки; нажмите на плитку максимума, чтобы скорректировать расчёт</span></h2>
+      <div class="kpi-row" id="collectionPotentialRow"></div>
+      <div id="collectionPotentialOptions" style="display:none;"></div>
+    </div>
+
     <div class="kpi-row" id="kpiRow"></div>
 
     <div class="card" id="anomaliesCard" style="display:none;border-color:color-mix(in srgb, var(--critical) 35%, var(--border));">
@@ -837,6 +843,7 @@ async function recomputeAndRenderPeriod(){
   document.getElementById('dashboardArea').style.display='block';
   renderKPIs();
   renderPeriodChangePanel();
+  renderCollectionPotential();
   renderAnomalies(currentPeriodRows, previousPeriodRows);
   renderProlongTable();
   renderDeptTargets();
@@ -945,9 +952,47 @@ function computePeriodChange(metric){
 }
 
 let periodChangeOpenMetric = null; // null | 'debt' | 'tons'
-let periodChangeExpandedBucket = null; // null | bucket label | '__total__' — какая строка разбивки развёрнута до клиентов
+let periodChangeExpandedBucket = null; // null | bucket label — какая строка разбивки по стадиям развёрнута до клиентов
+let periodChangeExpandedCause = null; // null | 'entering' | 'leaving' | 'continuing' — какая причина в заголовке развёрнута
 let lastPeriodChange = null; // {debt, tons} — кэш последнего расчёта для отрисовки разбивки без пересчёта
 function deltaColor(delta){ return delta>0 ? 'var(--critical)' : (delta<0 ? 'var(--good)' : 'var(--ink-muted)'); }
+
+// ---------- причины изменения (заголовок: тренд + было→стало + 3 причины) ----------
+// В отличие от разбивки по стадиям ниже (где единица учёта — стадия, и переход
+// контрагента между стадиями неизбежно выглядит как "минус в одной, плюс в другой"),
+// здесь единица учёта — ВЕСЬ просроченный портфель целиком. Контрагент, просто
+// сменивший стадию (например, 0-7 → 8-14), остаётся здесь в группе "изменение у
+// продолжающих должников" одной строкой с итоговой разницей — а не считается ни
+// новым долгом, ни погашением. Поэтому три причины (новый долг / погашено /
+// изменение у продолжающих) складываются в точности в общую дельту, без задвоения
+// одного и того же перехода как двух независимых событий.
+function computeCauseBridge(metric){
+  const prevValue = metric==='debt' ? (p=>factualDebtOf(p)) : (p=>(p.weight_kg||0)/1000);
+  const curValue = metric==='debt' ? (r=>debtForRow(r)) : (r=>(r.weight_kg||0)/1000);
+  const prevOverdue = (previousPeriodRows||[]).filter(p=>effectiveZoneAsOf(p)!==null);
+  const curOverdue = dynamicsActive.filter(r=>effectiveZone(r)!==null);
+  return computeBridgeForSet(prevOverdue, curOverdue, prevValue, curValue);
+}
+// Откуда/куда для конкретного контрагента — чтобы разбивка ПО СТАДИЯМ показывала
+// перетекание долга ("пришёл из стадии X" / "перешёл в стадию Y"), а не создавала
+// иллюзию, что деньги просто исчезли из одной стадии и появились в другой из ниоткуда.
+function zoneLookupMaps(){
+  const prevZoneByKey = new Map();
+  (previousPeriodRows||[]).forEach(p=>{ prevZoneByKey.set(p.client_key, effectiveZoneAsOf(p)); });
+  const curZoneByKey = new Map();
+  dynamicsActive.forEach(r=>{ curZoneByKey.set(r.client_key, effectiveZone(r)); });
+  return {prevZoneByKey, curZoneByKey};
+}
+function originLabel(clientKey, prevZoneByKey){
+  if(!prevZoneByKey.has(clientKey)) return 'новый долг';
+  const z = prevZoneByKey.get(clientKey);
+  return z ? ('пришёл из стадии '+BUCKET_TITLES[z]) : 'новый долг';
+}
+function destinationLabel(clientKey, curZoneByKey){
+  if(!curZoneByKey.has(clientKey)) return 'погашено / выбыло';
+  const z = curZoneByKey.get(clientKey);
+  return z ? ('перешёл в стадию '+BUCKET_TITLES[z]) : 'погашено полностью';
+}
 
 function renderPeriodChangePanel(){
   const card = document.getElementById('periodChangeCard');
@@ -975,15 +1020,17 @@ function renderPeriodChangePanel(){
       const m = el.dataset.metric;
       periodChangeOpenMetric = (periodChangeOpenMetric===m) ? null : m;
       periodChangeExpandedBucket = null;
+      periodChangeExpandedCause = null;
       renderPeriodChangePanel();
     });
   });
   renderPeriodChangeDrilldown();
 }
 
-// Клиенты внутри одной группы моста (новые/выбывшие/изменение у оставшихся),
-// отсортированные по величине вклада — сначала те, кто сильнее всего сдвинул стадию.
-function renderClientDeltaGroup(title, items, fmt){
+// Клиенты внутри одной группы (новые/выбывшие/изменение), отсортированные по
+// величине вклада — сначала те, кто сильнее всего сдвинул сумму. noteFn — опциональная
+// пометка в последней колонке (например, "пришёл из стадии X" или "стадия не изменилась").
+function renderClientDeltaGroup(title, items, fmt, noteFn){
   if(!items.length) return '';
   const sorted = items.slice().sort((a,b)=>Math.abs(b.delta)-Math.abs(a.delta));
   let h = '<div style="margin-bottom:12px;"><div style="font-weight:700;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:var(--ink-2);margin-bottom:5px;">'+title+' ('+items.length+')</div>';
@@ -993,51 +1040,87 @@ function renderClientDeltaGroup(title, items, fmt){
     h += '<tr><td class="client">'+r.client_raw+(r.manager?'<span class="manager">'+r.manager+'</span>':'')+'</td>'
       + '<td class="num">'+fmt(x.prevVal)+'</td>'
       + '<td class="num">'+fmt(x.curVal)+'</td>'
-      + '<td class="num" style="color:'+deltaColor(x.delta)+';font-weight:600;">'+(x.delta>0?'+':'')+fmt(x.delta)+'</td></tr>';
+      + '<td class="num" style="color:'+deltaColor(x.delta)+';font-weight:600;">'+(x.delta>0?'+':'')+fmt(x.delta)+'</td>'
+      + (noteFn ? '<td class="action-col">'+noteFn(x)+'</td>' : '')
+      + '</tr>';
   });
   h += '</tbody></table></div>';
   return h;
 }
-function renderBridgeClientDetail(bridge, fmt){
+// Деталь по КОНКРЕТНОЙ СТАДИИ: пришедших/ушедших подписываем "откуда"/"куда" —
+// показываем перетекание долга между стадиями, а не абстрактные "новые"/"выбывшие".
+function renderBridgeClientDetail(bridge, fmt, prevZoneByKey, curZoneByKey){
   let h = '<div class="log-box">';
-  h += renderClientDeltaGroup('Новые в стадии', bridge.enteringRows, fmt);
-  h += renderClientDeltaGroup('Выбывшие из стадии', bridge.leavingRows, fmt);
-  h += renderClientDeltaGroup('Изменение у оставшихся', bridge.continuingRows, fmt);
+  h += renderClientDeltaGroup('Пришли в стадию', bridge.enteringRows, fmt, x=>originLabel(x.row.client_key, prevZoneByKey));
+  h += renderClientDeltaGroup('Ушли из стадии', bridge.leavingRows, fmt, x=>destinationLabel(x.row.client_key, curZoneByKey));
+  h += renderClientDeltaGroup('Остались в стадии (изменилась сумма)', bridge.continuingRows, fmt);
   if(!bridge.enteringRows.length && !bridge.leavingRows.length && !bridge.continuingRows.length){
     h += '<div class="note">Никого нет.</div>';
   }
   h += '</div>';
   return h;
 }
+// Деталь по ПРИЧИНЕ (заголовок): для "изменения у продолжающих" показываем явный
+// переход стадии было→стало у каждого, чтобы было видно, что это перетекание, а не
+// новое явление.
+function renderCauseDetail(key, cause, fmt, prevZoneByKey, curZoneByKey){
+  let h = '<div style="margin-top:10px;border-top:1px solid var(--border);padding-top:10px;">';
+  if(key==='entering') h += renderClientDeltaGroup('Новый долг', cause.enteringRows, fmt) || '<div class="note">Никого нет.</div>';
+  else if(key==='leaving') h += renderClientDeltaGroup('Погашено / выбыло', cause.leavingRows, fmt) || '<div class="note">Никого нет.</div>';
+  else h += renderClientDeltaGroup('Изменение у продолжающих должников', cause.continuingRows, fmt, x=>{
+    const pz = prevZoneByKey.get(x.row.client_key), cz = curZoneByKey.get(x.row.client_key);
+    return pz===cz ? 'стадия не изменилась' : (bucketChip(pz)+'<span class="arrow">→</span>'+bucketChip(cz));
+  }) || '<div class="note">Никого нет.</div>';
+  h += '</div>';
+  return h;
+}
+function causeChip(key, title, amount, count, fmt){
+  const active = periodChangeExpandedCause===key;
+  return '<div class="kpi" data-cause-key="'+key+'" style="cursor:pointer;'+(active?'border-color:var(--accent);':'')+'">'
+    + '<div class="label">'+title+'</div>'
+    + '<div class="value" style="color:'+deltaColor(amount)+';">'+(amount>0?'+':'')+fmt(amount)+'</div>'
+    + '<div class="sub">'+count+' контрагентов · нажмите — список</div>'
+    + '</div>';
+}
 
 function renderPeriodChangeDrilldown(){
   const box = document.getElementById('periodChangeDrilldown');
   if(!periodChangeOpenMetric || !lastPeriodChange){ box.style.display='none'; box.innerHTML=''; return; }
-  const ch = lastPeriodChange[periodChangeOpenMetric];
-  const fmt = periodChangeOpenMetric==='debt' ? fmtRub : fmtTons;
-  const label = periodChangeOpenMetric==='debt' ? 'долг' : 'тоннаж';
-  let h = '<h3 style="font-size:12px;text-transform:uppercase;letter-spacing:0.05em;color:var(--ink-2);margin:14px 0 8px;">Разбивка по стадиям — '+label+' <span class="hint">нажмите на строку — список клиентов</span></h3>'
+  const metric = periodChangeOpenMetric;
+  const ch = lastPeriodChange[metric];
+  const fmt = metric==='debt' ? fmtRub : fmtTons;
+  const label = metric==='debt' ? 'долг' : 'тоннаж';
+  const cause = computeCauseBridge(metric);
+  const {prevZoneByKey, curZoneByKey} = zoneLookupMaps();
+
+  const trendWord = cause.delta>0 ? 'растёт' : (cause.delta<0 ? 'снижается' : 'без изменений');
+  let h = '<div style="margin:14px 0 16px;padding:14px 16px;background:var(--surface-2);border-radius:var(--radius);">'
+    + '<div style="font-size:15px;font-weight:700;color:'+deltaColor(cause.delta)+';margin-bottom:2px;">'+(metric==='debt'?'Долг просроченных':'Тоннаж в просрочке')+' '+trendWord+'</div>'
+    + '<div class="sub" style="margin-bottom:10px;">было '+fmt(cause.prevTotal)+' → стало '+fmt(cause.curTotal)+' ('+(cause.delta>0?'+':'')+fmt(cause.delta)+')</div>'
+    + '<div class="kpi-row" style="grid-template-columns:repeat(3,1fr);margin-bottom:0;">'
+    + causeChip('entering', 'Новый долг', cause.entering, cause.enteringRows.length, fmt)
+    + causeChip('leaving', 'Погашено / выбыло', cause.leaving, cause.leavingRows.length, fmt)
+    + causeChip('continuing', 'Изменение у продолжающих', cause.continuing, cause.continuingRows.length, fmt)
+    + '</div>'
+    + (periodChangeExpandedCause ? renderCauseDetail(periodChangeExpandedCause, cause, fmt, prevZoneByKey, curZoneByKey) : '')
+    + '</div>';
+
+  h += '<h3 style="font-size:12px;text-transform:uppercase;letter-spacing:0.05em;color:var(--ink-2);margin:14px 0 8px;">Разбивка по стадиям — '+label+' <span class="hint">как перераспределён портфель по стадиям сейчас; нажмите на строку — кто пришёл/ушёл</span></h3>'
     + '<div class="table-wrap"><table class="dyn"><thead><tr>'
-    + '<th>Стадия</th><th>Было</th><th>Стало</th><th>Δ</th><th>Новые в стадии</th><th>Выбывшие из стадии</th><th>Изменение у оставшихся</th>'
+    + '<th>Стадия</th><th>Было</th><th>Стало</th><th>Δ</th>'
     + '</tr></thead><tbody>';
-  function row(key, titleHtml, r, bold){
-    const expanded = periodChangeExpandedBucket===key;
-    let out = '<tr data-bucket-key="'+key+'" style="cursor:pointer;'+(bold?'font-weight:700;background:var(--surface-2);':'')+(expanded?'box-shadow:inset 3px 0 0 var(--accent);':'')+'">'
-      + '<td>'+titleHtml+'</td>'
+  ch.rows.forEach(r=>{
+    const expanded = periodChangeExpandedBucket===r.bucket;
+    h += '<tr data-bucket-key="'+r.bucket+'" style="cursor:pointer;'+(expanded?'box-shadow:inset 3px 0 0 var(--accent);':'')+'">'
+      + '<td>'+bucketChip(r.bucket)+'</td>'
       + '<td class="num">'+fmt(r.prevTotal)+'</td>'
       + '<td class="num">'+fmt(r.curTotal)+'</td>'
       + '<td class="num" style="color:'+deltaColor(r.delta)+';">'+(r.delta>0?'+':'')+fmt(r.delta)+'</td>'
-      + '<td class="num">'+(r.entering>0?'+':'')+fmt(r.entering)+'</td>'
-      + '<td class="num">'+fmt(r.leaving)+'</td>'
-      + '<td class="num">'+(r.continuing>0?'+':'')+fmt(r.continuing)+'</td>'
       + '</tr>';
     if(expanded){
-      out += '<tr class="log-row" data-bucket-detail="'+key+'"><td colspan="7">'+renderBridgeClientDetail(r, fmt)+'</td></tr>';
+      h += '<tr class="log-row" data-bucket-detail="'+r.bucket+'"><td colspan="4">'+renderBridgeClientDetail(r, fmt, prevZoneByKey, curZoneByKey)+'</td></tr>';
     }
-    return out;
-  }
-  ch.rows.forEach(r=>{ h += row(r.bucket, bucketChip(r.bucket), r, false); });
-  h += row('__total__', 'Итого', ch.total, true);
+  });
   h += '</tbody></table></div>';
   box.innerHTML = h;
   box.style.display='block';
@@ -1048,6 +1131,73 @@ function renderPeriodChangeDrilldown(){
       renderPeriodChangeDrilldown();
     });
   });
+  box.querySelectorAll('[data-cause-key]').forEach(el=>{
+    el.addEventListener('click', ()=>{
+      const key = el.dataset.causeKey;
+      periodChangeExpandedCause = (periodChangeExpandedCause===key) ? null : key;
+      renderPeriodChangeDrilldown();
+    });
+  });
+}
+
+/* ---------- collection potential (billing ceiling, independent of debt/overdue) ----------
+   Суточный платёж × число дней в месяце отчёта = сколько максимум можно собрать за
+   период при 100%-й платёжной дисциплине по текущему сданному в аренду тоннажу — это
+   ПОТОЛОК, а не факт и не долг; не смешивается с "Изменения за период"/долговыми KPI. */
+function daysInMonthOf(dateStr){
+  const d = toUTCDate(dateStr);
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth()+1, 0)).getUTCDate();
+}
+function ruDays(n){
+  const a = Math.abs(Math.round(n))%100;
+  const b = a%10;
+  if(a>10 && a<20) return 'дней';
+  if(b>1 && b<5) return 'дня';
+  if(b===1) return 'день';
+  return 'дней';
+}
+let collectionAdjustAdvance = false; // учесть уже внесённые авансы (вычесть из максимума)
+let collectionExcludeD29 = false; // исключить должников 29+ из расчёта как нереалистичных
+let collectionOptionsExpanded = false;
+function computeCollectionPotential(){
+  const rows = dynamicsActive.filter(r=> (r.weight_kg||0)>0 && (r.daily_payment||0)>0 && !(collectionExcludeD29 && effectiveZone(r)==='29+'));
+  const dailyTotal = rows.reduce((s,r)=>s+(r.daily_payment||0),0);
+  const days = currentPeriodRows.length ? daysInMonthOf(currentPeriodRows[0].report_date) : 30;
+  const advanceTotal = rows.reduce((s,r)=>{
+    const l = isLatestSnapshotForClient(r) ? clientLedgers.get(r.client_key) : null;
+    return s + (l ? (l.advance||0) : (r.advance||0));
+  },0);
+  let max = dailyTotal * days;
+  if(collectionAdjustAdvance) max = Math.max(0, max - advanceTotal);
+  return { dailyTotal, days, max, advanceTotal, count: rows.length };
+}
+function renderCollectionPotential(){
+  const card = document.getElementById('collectionPotentialCard');
+  if(!currentPeriodRows.length){ card.style.display='none'; return; }
+  card.style.display='block';
+  const p = computeCollectionPotential();
+  const tiles = [
+    ['Суточный платёж (текущий)', fmtRub(p.dailyTotal), p.count+' контрагентов со сданным в аренду тоннажем', false],
+    ['Максимум сбора за период', fmtRub(p.max), p.days+' '+ruDays(p.days)+' × суточный платёж'+(collectionAdjustAdvance?' − авансы':'')+(collectionExcludeD29?' · без 29+':'')+' · нажмите — настроить', true],
+  ];
+  document.getElementById('collectionPotentialRow').innerHTML = tiles.map(t=>
+    '<div class="kpi"'+(t[3]?' id="collectionMaxTile" style="cursor:pointer;'+(collectionOptionsExpanded?'border-color:var(--accent);':'')+'"':'')+'>'
+    + '<div class="label">'+t[0]+'</div><div class="value">'+t[1]+'</div><div class="sub">'+t[2]+'</div></div>'
+  ).join('');
+  document.getElementById('collectionMaxTile').addEventListener('click', ()=>{
+    collectionOptionsExpanded = !collectionOptionsExpanded;
+    renderCollectionPotential();
+  });
+  const box = document.getElementById('collectionPotentialOptions');
+  if(!collectionOptionsExpanded){ box.style.display='none'; box.innerHTML=''; return; }
+  box.style.display='block';
+  box.innerHTML = '<div class="field-row" style="margin-top:10px;">'
+    + '<label><input type="checkbox" id="collectionAdjustAdvanceChk"'+(collectionAdjustAdvance?' checked':'')+'> учесть уже внесённые авансы (вычесть '+fmtRub(p.advanceTotal)+' из максимума)</label>'
+    + '</div><div class="field-row">'
+    + '<label><input type="checkbox" id="collectionExcludeD29Chk"'+(collectionExcludeD29?' checked':'')+'> исключить должников 29+ из расчёта</label>'
+    + '</div>';
+  document.getElementById('collectionAdjustAdvanceChk').addEventListener('change', e=>{ collectionAdjustAdvance = e.target.checked; renderCollectionPotential(); });
+  document.getElementById('collectionExcludeD29Chk').addEventListener('change', e=>{ collectionExcludeD29 = e.target.checked; renderCollectionPotential(); });
 }
 
 /* ---------- prolongation window (before official overdue starts) ---------- */
