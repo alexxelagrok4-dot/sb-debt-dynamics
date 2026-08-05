@@ -236,10 +236,21 @@ tr.log-row td{background:var(--surface-2);white-space:normal;}
     </div>
 
     <div class="card">
-      <h2>Контрагенты в просрочке <span class="hint">стадия считается от накопленного долга (после того, как исчерпан аванс), в днях суточного платежа — а не от календарных дней 1С; по умолчанию — сначала ухудшившиеся</span></h2>
+      <h2>Стадии сейчас <span class="hint">состав портфеля на текущую загрузку (не путать с «было на прошлой загрузке» в панели «Изменения за период») — нажмите на стадию, чтобы увидеть контрагентов в таблице ниже</span></h2>
+      <div class="table-wrap"><table class="dyn" id="stageSummaryTable"></table></div>
+    </div>
+
+    <div class="card">
+      <h2 id="mainTableAnchor">Контрагенты в просрочке <span class="hint">стадия считается от накопленного долга (после того, как исчерпан аванс), в днях суточного платежа — а не от календарных дней 1С; по умолчанию — сначала ухудшившиеся</span></h2>
       <div class="filters">
         <input type="text" id="searchInput" placeholder="Поиск по названию…">
-        <label><input type="checkbox" id="onlyWorseChk"> только ухудшившиеся</label>
+        <select id="statusFilter">
+          <option value="">Все статусы</option>
+          <option value="worse">Только ухудшившиеся</option>
+          <option value="better">Только улучшившиеся</option>
+          <option value="new">Только новые</option>
+          <option value="same">Без изменений</option>
+        </select>
         <label><input type="checkbox" id="onlyMissingActionChk"> только без нужного действия</label>
         <select id="bucketFilter">
           <option value="">Все стадии</option>
@@ -247,6 +258,7 @@ tr.log-row td{background:var(--surface-2);white-space:normal;}
           <option value="8-14">8–14 дней (претензия)</option>
           <option value="15-21">15–21 день (начало изъятия)</option>
           <option value="22-28">22–28 дней (изъятие)</option>
+          <option value="15-21,22-28">15–28 дней (изъятие, объединённо)</option>
           <option value="29+">29+ (красная линия)</option>
         </select>
       </div>
@@ -842,6 +854,7 @@ async function recomputeAndRenderPeriod(){
   renderAnomalies(currentPeriodRows, previousPeriodRows);
   renderProlongTable();
   renderDeptTargets();
+  renderCurrentStageSummary();
   renderMainTable();
   renderResolvedTable();
   renderPartialResolutions();
@@ -870,18 +883,27 @@ function renderKPIs(){
 
   const prolongCount = dynamicsActive.filter(r=>isProlongWindow(r.overdue_days) && !isConfirmedReturn(r.client_key)).length;
   const tiles = [
-    ['На продлении (до просрочки)', prolongCount, 'заканчивается оплаченный срок'],
-    ['Контрагентов в просрочке', overdue.length, ''],
-    ['Тоннаж в просрочке', fmtTons(tonsOverdue), 'из ' + fmtTons(tonsTotal) + ' у клиентов (' + nf1.format(pct) + '%)'],
-    ['Долг просроченных (накоплено), ₽', fmtRub(debtOverdue), 'факт. долг из аванса и прогноза задолженности 1С на старте, дальше — счета/оплаты/взыскания'],
-    ['Ухудшилось', worse, 'за период'],
-    ['Улучшилось', better, 'за период'],
-    ['Новые в просрочке', isNew, ''],
-    ['Погашено / выбыло', resolvedCount, ''],
+    ['На продлении (до просрочки)', prolongCount, 'заканчивается оплаченный срок', 'prolong'],
+    ['Контрагентов в просрочке', overdue.length, '', 'all'],
+    ['Тоннаж в просрочке', fmtTons(tonsOverdue), 'из ' + fmtTons(tonsTotal) + ' у клиентов (' + nf1.format(pct) + '%)', 'all'],
+    ['Долг просроченных (накоплено), ₽', fmtRub(debtOverdue), 'факт. долг из аванса и прогноза задолженности 1С на старте, дальше — счета/оплаты/взыскания', 'all'],
+    ['Ухудшилось', worse, 'за период', 'worse'],
+    ['Улучшилось', better, 'за период', 'better'],
+    ['Новые в просрочке', isNew, '', 'new'],
+    ['Погашено / выбыло', resolvedCount, '', 'resolved'],
   ];
   document.getElementById('kpiRow').innerHTML = tiles.map(t=>
-    '<div class="kpi"><div class="label">'+t[0]+'</div><div class="value">'+t[1]+'</div>'+(t[2]?'<div class="sub">'+t[2]+'</div>':'')+'</div>'
+    '<div class="kpi" data-jump-kpi="'+t[3]+'" style="cursor:pointer;"><div class="label">'+t[0]+'</div><div class="value">'+t[1]+'</div>'+(t[2]?'<div class="sub">'+t[2]+'</div>':'')+'</div>'
   ).join('');
+  document.querySelectorAll('#kpiRow [data-jump-kpi]').forEach(el=>{
+    el.addEventListener('click', ()=>{
+      const key = el.dataset.jumpKpi;
+      if(key==='prolong') jumpToProlongTable();
+      else if(key==='resolved') jumpToResolvedTable();
+      else if(key==='all') jumpToMainTable({clearSearch:true});
+      else jumpToMainTable({status:key, clearSearch:true});
+    });
+  });
 }
 
 /* ---------- period-over-period change panel (debt & tonnage, by stage) ----------
@@ -1274,22 +1296,78 @@ function renderDeptTargets(){
   const b29TonsReturned = sumLedger(b29, 'cumulativeTonsReturned');
 
   const tiles = [
-    ['Продление · 0–7 дней', fmtRub(sumMoney(b07)), zone07Pending.length+' из '+b07.length+' — без звонка/подтверждения оплаты'],
-    ['Претензии · 8–14 дней', claimPending.length+' из '+b0814.length, 'ещё не направлена; под риском '+fmtRub(sumMoney(b0814))],
-    ['Изъятие · 15–28 дней', fmtTons(sumTons(seizureRows)), seizurePending.length+' из '+seizureRows.length+' — не начато/не завершено'],
-    ['Взыскание (суд) · 29+', fmtRub(sumMoney(b29))+' + '+fmtTons(sumTons(b29))+' под риском', courtPending.length+' из '+b29.length+' — ещё не передано в суд; уже взыскано '+fmtRub(b29Recovered)+', возвращено '+fmtTons(b29TonsReturned)],
+    ['Продление · 0–7 дней', fmtRub(sumMoney(b07)), zone07Pending.length+' из '+b07.length+' — без звонка/подтверждения оплаты', '0-7'],
+    ['Претензии · 8–14 дней', claimPending.length+' из '+b0814.length, 'ещё не направлена; под риском '+fmtRub(sumMoney(b0814)), '8-14'],
+    ['Изъятие · 15–28 дней', fmtTons(sumTons(seizureRows)), seizurePending.length+' из '+seizureRows.length+' — не начато/не завершено', '15-21,22-28'],
+    ['Взыскание (суд) · 29+', fmtRub(sumMoney(b29))+' + '+fmtTons(sumTons(b29))+' под риском', courtPending.length+' из '+b29.length+' — ещё не передано в суд; уже взыскано '+fmtRub(b29Recovered)+', возвращено '+fmtTons(b29TonsReturned), '29+'],
   ];
   document.getElementById('deptRow').innerHTML = tiles.map(t=>
-    '<div class="kpi"><div class="label">'+t[0]+'</div><div class="value">'+t[1]+'</div><div class="sub">'+t[2]+'</div></div>'
+    '<div class="kpi" data-jump-bucket="'+t[3]+'" style="cursor:pointer;"><div class="label">'+t[0]+'</div><div class="value">'+t[1]+'</div><div class="sub">'+t[2]+' · нажмите — список</div></div>'
   ).join('');
+  document.querySelectorAll('#deptRow [data-jump-bucket]').forEach(el=>{
+    el.addEventListener('click', ()=> jumpToMainTable({bucket: el.dataset.jumpBucket, clearSearch:true}));
+  });
+}
+
+/* ---------- jump-to-detail: клик по любому агрегату переносит в исходную таблицу с
+   уже применённым фильтром, вместо того чтобы держать параллельный (и потенциально
+   расходящийся) пересчёт — единственный источник истины остаётся один. ---------- */
+function jumpToMainTable(opts){
+  opts = opts || {};
+  document.getElementById('bucketFilter').value = opts.bucket || '';
+  document.getElementById('statusFilter').value = opts.status || '';
+  document.getElementById('onlyMissingActionChk').checked = !!opts.onlyMissing;
+  if(opts.clearSearch) document.getElementById('searchInput').value = '';
+  renderMainTable();
+  document.getElementById('mainTableAnchor').scrollIntoView({behavior:'smooth', block:'start'});
+}
+function jumpToProlongTable(opts){
+  opts = opts || {};
+  document.getElementById('prolongOnlyMissingChk').checked = !!opts.onlyMissing;
+  renderProlongTable();
+  document.getElementById('prolongTable').scrollIntoView({behavior:'smooth', block:'start'});
+}
+function jumpToResolvedTable(){
+  document.getElementById('resolvedTable').scrollIntoView({behavior:'smooth', block:'start'});
+}
+
+/* ---------- current-stage summary (matches the main table 1:1 — same data source) ---------- */
+function computeCurrentStageSummary(){
+  return BUCKET_LABELS.map(b=>{
+    const rows = dynamicsActive.filter(r=>effectiveZone(r)===b);
+    return {
+      bucket: b, count: rows.length,
+      debt: rows.reduce((s,r)=>s+debtForRow(r),0),
+      tons: rows.reduce((s,r)=>s+(r.weight_kg||0),0)/1000
+    };
+  });
+}
+function renderCurrentStageSummary(){
+  const table = document.getElementById('stageSummaryTable');
+  const rows = computeCurrentStageSummary();
+  let h = '<thead><tr><th>Стадия</th><th>Контрагентов</th><th>Долг, ₽</th><th>Тоннаж, т</th></tr></thead><tbody>';
+  rows.forEach(r=>{
+    h += '<tr data-jump-bucket="'+r.bucket+'" style="cursor:pointer;">'
+      + '<td>'+bucketChip(r.bucket)+'</td>'
+      + '<td class="num">'+r.count+'</td>'
+      + '<td class="num">'+fmtRub(r.debt)+'</td>'
+      + '<td class="num">'+fmtTons(r.tons)+'</td>'
+      + '</tr>';
+  });
+  h += '</tbody>';
+  table.innerHTML = h;
+  table.querySelectorAll('tr[data-jump-bucket]').forEach(tr=>{
+    tr.addEventListener('click', ()=> jumpToMainTable({bucket: tr.dataset.jumpBucket, clearSearch:true}));
+  });
 }
 
 /* ---------- main table ---------- */
 function applyFilters(rows){
   const q = document.getElementById('searchInput').value.trim().toLowerCase();
-  const onlyWorse = document.getElementById('onlyWorseChk').checked;
+  const statusF = document.getElementById('statusFilter').value;
   const onlyMissing = document.getElementById('onlyMissingActionChk').checked;
   const bucketF = document.getElementById('bucketFilter').value;
+  const bucketList = bucketF ? bucketF.split(',') : null;
   return rows.filter(r=>{
     // Состав таблицы — те, у кого effectiveZone относит к какой-либо стадии (денежная
     // логика: факт. долг из аванса и прогноза задолженности 1С, а не сырая календарная
@@ -1297,9 +1375,9 @@ function applyFilters(rows){
     // начислением). В календарном режиме effectiveZone совпадает с сырым бакетом 1С.
     if(!effectiveZone(r)) return false;
     if(q && r.client_raw.toLowerCase().indexOf(q)===-1) return false;
-    if(onlyWorse && r.status!=='worse') return false;
+    if(statusF && r.status!==statusF) return false;
     if(onlyMissing && !isMissingAction(r)) return false;
-    if(bucketF && effectiveZone(r)!==bucketF) return false;
+    if(bucketList && bucketList.indexOf(effectiveZone(r))===-1) return false;
     return true;
   });
 }
@@ -1602,7 +1680,7 @@ function renderForecastTable(){
 document.getElementById('forecastDateInput').addEventListener('change', renderForecastTable);
 
 ['searchInput'].forEach(id=> document.getElementById(id).addEventListener('input', renderMainTable));
-['onlyWorseChk','onlyMissingActionChk','bucketFilter'].forEach(id=> document.getElementById(id).addEventListener('change', renderMainTable));
+['statusFilter','onlyMissingActionChk','bucketFilter'].forEach(id=> document.getElementById(id).addEventListener('change', renderMainTable));
 document.getElementById('prolongOnlyMissingChk').addEventListener('change', renderProlongTable);
 
 /* ---------- upload flow ---------- */
