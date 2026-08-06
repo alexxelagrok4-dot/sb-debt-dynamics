@@ -1361,6 +1361,29 @@ function renderCurrentStageSummary(){
   });
 }
 
+/* ---------- ранжирование главной таблицы по клику на заголовок ----------
+   Один активный критерий за раз (клик по другому заголовку переключает на него),
+   повторный клик по тому же — меняет направление. Стрелка ▼/▲ показывает текущее
+   направление. Без выбранного критерия — обычный порядок (сначала ухудшившиеся). */
+let mainTableSort = {field: null, dir: 'desc'}; // field: null | 'days' | 'debt' | 'tons'
+function cmpNum(a, b){
+  if(a===b) return 0;
+  if(!isFinite(a)) return a>0 ? 1 : -1;
+  if(!isFinite(b)) return b>0 ? -1 : 1;
+  return a - b;
+}
+function mainTableSortValue(r, field){
+  if(field==='debt') return debtForRow(r);
+  if(field==='tons') return (r.weight_kg||0)/1000;
+  if(field==='days') return displayedOverdueDays(r);
+  return 0;
+}
+function sortHeaderCell(label, field){
+  const active = mainTableSort.field===field;
+  const arrow = active ? (mainTableSort.dir==='desc' ? ' ▼' : ' ▲') : '';
+  return '<th data-sort-field="'+field+'" style="cursor:pointer;'+(active?'color:var(--accent);':'')+'">'+label+arrow+'</th>';
+}
+
 /* ---------- main table ---------- */
 function applyFilters(rows){
   const q = document.getElementById('searchInput').value.trim().toLowerCase();
@@ -1384,10 +1407,14 @@ function applyFilters(rows){
 
 function renderMainTable(){
   const rows = applyFilters(dynamicsActive);
+  if(mainTableSort.field){
+    const dir = mainTableSort.dir==='asc' ? 1 : -1;
+    rows.sort((a,b)=> dir * cmpNum(mainTableSortValue(a, mainTableSort.field), mainTableSortValue(b, mainTableSort.field)));
+  }
   const table = document.getElementById('mainTable');
   let h = '<thead><tr>'
-    + '<th>Контрагент</th><th>Стадия</th><th>Дней просрочки</th>'
-    + '<th>Долг, ₽</th><th>Тоннаж, т</th><th>Действие</th><th>Последнее действие</th><th></th>'
+    + '<th>Контрагент</th><th>Стадия</th>'+sortHeaderCell('Дней просрочки','days')
+    + sortHeaderCell('Долг, ₽','debt')+sortHeaderCell('Тоннаж, т','tons')+'<th>Действие</th><th>Последнее действие</th><th></th>'
     + '</tr></thead><tbody>';
   if(!rows.length){
     h += '<tr><td colspan="8" style="color:var(--ink-muted);">Никого не найдено по текущим фильтрам.</td></tr>';
@@ -1418,6 +1445,14 @@ function renderMainTable(){
   h += '</tbody>';
   table.innerHTML = h;
 
+  table.querySelectorAll('th[data-sort-field]').forEach(th=>{
+    th.addEventListener('click', ()=>{
+      const field = th.dataset.sortField;
+      if(mainTableSort.field===field) mainTableSort = {field, dir: mainTableSort.dir==='desc'?'asc':'desc'};
+      else mainTableSort = {field, dir:'desc'};
+      renderMainTable();
+    });
+  });
   table.querySelectorAll('button[data-toggle]').forEach(btn=>{
     btn.addEventListener('click', ()=>{
       const key = decodeURIComponent(btn.dataset.toggle);
