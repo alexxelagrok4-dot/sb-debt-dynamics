@@ -165,11 +165,20 @@ tr.log-row td{background:var(--surface-2);white-space:normal;}
   <header class="top">
     <div class="userbar">
       <span class="email" id="userEmail"></span>
+      <button class="btn" id="adminAuditBtn" style="display:none;">Журнал изменений</button>
       <button class="btn" id="signOutBtn">Выйти</button>
     </div>
     <h1>СБ — динамика просрочки</h1>
     <p>Раз в неделю загружайте файл «отчёт СБ» из 1С — инструмент сам классифицирует стадию по каждому контрагенту (0–7 / 8–14 / 15–21 / 22–28 / 29+ дней) и сравнивает с прошлой загрузкой: кто ухудшился, кто оплатил, кто новый. Ниже — журнал произведённых действий по каждому контрагенту.</p>
   </header>
+
+  <div class="card" id="adminAuditCard" style="display:none;">
+    <h2>Журнал изменений <span class="hint">видно только администратору — все действия и загрузки всех пользователей, кто/что/когда</span></h2>
+    <div class="filters">
+      <input type="text" id="adminAuditSearch" placeholder="Фильтр по пользователю, контрагенту, типу…">
+    </div>
+    <div class="table-wrap"><table class="dyn" id="adminAuditTable"></table></div>
+  </div>
 
   <div class="card">
     <h2>Загрузка отчёта <span class="hint">файл «отчёт СБ», как выгружается из 1С</span></h2>
@@ -454,19 +463,21 @@ function computeClientLedger(baselineRow, actionsForClient, dailyRateOverride, c
       return String(a.created_at||'').localeCompare(String(b.created_at||''));
     });
   relevant.forEach(a=>{
-    asOfDate = a.action_date;
     if(a.action_type===INVOICE_ACTION && a.invoice_period_end){
-      const days = daysBetween(lastPeriodEnd, a.invoice_period_end);
-      if(days>0){
-        const amount = days*rate;
-        if(advance>=amount){ advance -= amount; }
-        else { debt += (amount-advance); advance = 0; }
-        lastPeriodEnd = a.invoice_period_end;
-      }
+      // Выставленный счёт — это ПРОСЬБА оплатить будущий период, а не факт оплаты или
+      // уже потреблённые дни. Раньше весь выставленный период сразу списывался как
+      // долг (см. changelog про Энергодонстрой: счёт на 28 дней вперёд мгновенно
+      // превращал клиента без долга в 29+, хотя период ещё не наступил). Теперь счёт
+      // только продлевает отображаемую "Оплачен период по" — реальный долг считается
+      // из факта 1С (аванс/прогноз задолженности) и подтверждённых оплат/взысканий,
+      // поэтому asOfDate здесь не трогаем — новых сведений о текущем долге нет.
+      if(a.invoice_period_end > lastPeriodEnd) lastPeriodEnd = a.invoice_period_end;
     } else if(a.action_type===PAYMENT_ACTION && a.payment_amount!==null && a.payment_amount!==undefined){
       debt = Math.max(0, debt - a.payment_amount);
+      asOfDate = a.action_date;
     } else if(a.action_type===RECOVERY_ACTION && a.recovered_amount!==null && a.recovered_amount!==undefined){
       debt = Math.max(0, debt - a.recovered_amount);
+      asOfDate = a.action_date;
     }
   });
   return { debt, advance, dailyRate: rate, lastPeriodEnd, asOfDate, cumulativeRecovered, cumulativeTonsReturned };
@@ -751,17 +762,75 @@ document.getElementById('signUpBtn').addEventListener('click', async ()=>{
 });
 document.getElementById('signOutBtn').addEventListener('click', ()=> sb.auth.signOut());
 
+// Доступ к журналу изменений — только защита на уровне интерфейса (кнопка/экран
+// скрыты не-админам), без отдельных прав в базе: соответствует текущей модели
+// доверия приложения (все авторизованные пользователи и так читают/пишут все
+// таблицы). Список — логины (до "@..."), не email целиком.
+const ADMIN_LOGINS = ['alexxela'];
+let currentUserLogin = null;
 sb.auth.onAuthStateChange((event, session)=>{
   if(session){
     authScreen.style.display='none';
     appRoot.style.display='block';
-    userEmailEl.textContent = emailToLogin(session.user.email);
+    currentUserLogin = emailToLogin(session.user.email);
+    userEmailEl.textContent = currentUserLogin;
+    document.getElementById('adminAuditBtn').style.display = ADMIN_LOGINS.indexOf(currentUserLogin)!==-1 ? '' : 'none';
     loadUploadsList();
   } else {
     authScreen.style.display='flex';
     appRoot.style.display='none';
+    currentUserLogin = null;
   }
 });
+
+/* ---------- журнал изменений (только админ): все действия + все загрузки ---------- */
+let adminAuditRows = [];
+let adminAuditVisible = false;
+async function loadAdminAuditLog(){
+  const [{ data: actions }, { data: uploads }] = await Promise.all([
+    sb.from('sb_actions').select('*').order('created_at',{ascending:false}).limit(500),
+    sb.from('sb_uploads').select('*').order('created_at',{ascending:false}).limit(200)
+  ]);
+  const actionRows = (actions||[]).map(a=>({
+    when: a.created_at, who: emailToLogin(a.created_by_email), type: a.action_type,
+    subject: a.client_raw||a.client_key, details: (a.comment||'') + actionExtraText(a), relatesTo: fmtDate(a.action_date)
+  }));
+  const uploadRows = (uploads||[]).map(u=>({
+    when: u.created_at, who: emailToLogin(u.uploaded_by_email), type: 'Загрузка отчёта',
+    subject: u.filename||'—', details: (u.row_count||0)+' контрагентов', relatesTo: fmtDate(u.report_date)
+  }));
+  adminAuditRows = actionRows.concat(uploadRows).sort((a,b)=> String(b.when||'').localeCompare(String(a.when||'')));
+  renderAdminAuditLog();
+}
+function renderAdminAuditLog(){
+  const table = document.getElementById('adminAuditTable');
+  const q = document.getElementById('adminAuditSearch').value.trim().toLowerCase();
+  const rows = adminAuditRows.filter(r=> !q ||
+    (r.who||'').toLowerCase().indexOf(q)!==-1 || (r.subject||'').toLowerCase().indexOf(q)!==-1 || (r.type||'').toLowerCase().indexOf(q)!==-1);
+  let h = '<thead><tr><th>Когда</th><th>Кто</th><th>Что</th><th>Контрагент / файл</th><th>Относится к дате</th><th>Детали</th></tr></thead><tbody>';
+  if(!rows.length){ h += '<tr><td colspan="6" style="color:var(--ink-muted);padding:8px;">Ничего не найдено.</td></tr>'; }
+  rows.forEach(r=>{
+    const dt = r.when ? new Date(r.when) : null;
+    h += '<tr><td class="num">'+(dt?dt.toLocaleString('ru-RU'):'—')+'</td>'
+      + '<td>'+(r.who||'—')+'</td>'
+      + '<td>'+r.type+'</td>'
+      + '<td class="client">'+r.subject+'</td>'
+      + '<td class="num">'+r.relatesTo+'</td>'
+      + '<td class="action-col">'+(r.details||'—')+'</td></tr>';
+  });
+  h += '</tbody>';
+  table.innerHTML = h;
+}
+document.getElementById('adminAuditBtn').addEventListener('click', async ()=>{
+  adminAuditVisible = !adminAuditVisible;
+  const card = document.getElementById('adminAuditCard');
+  card.style.display = adminAuditVisible ? 'block' : 'none';
+  if(adminAuditVisible){
+    await loadAdminAuditLog();
+    card.scrollIntoView({behavior:'smooth', block:'start'});
+  }
+});
+document.getElementById('adminAuditSearch').addEventListener('input', renderAdminAuditLog);
 
 /* ---------- uploads list & period selection ---------- */
 async function loadUploadsList(){
